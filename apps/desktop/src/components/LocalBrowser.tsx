@@ -7,7 +7,7 @@ interface Props {
   entries: LocalEntry[];
   error: string | null;
   onEnter: (e: LocalEntry) => void;
-  onUp: () => void;
+  onCrumb: (path: string) => void;
   onDragItem: (entry: LocalEntry, point: { x: number; y: number }) => void;
 }
 
@@ -38,7 +38,7 @@ export function LocalBrowser({
   entries,
   error,
   onEnter,
-  onUp,
+  onCrumb,
   onDragItem,
 }: Props) {
   const [sortKey, setSortKey] = useState<SortKey>("name");
@@ -83,6 +83,8 @@ export function LocalBrowser({
     });
   }, [entries, sortKey, sortOrder]);
 
+  const breadcrumbs = useMemo(() => buildLocalBreadcrumbs(currentPath), [currentPath]);
+
   const renderHeader = (key: SortKey, label: string) => (
     <div 
       className={`col col-${key} ${sortKey === key ? "active" : ""}`} 
@@ -95,13 +97,15 @@ export function LocalBrowser({
 
   return (
     <div className="browser">
-      <div className="toolbar" style={{ display: "flex", gap: "8px", alignItems: "center" }}>
-        <button onClick={onUp} disabled={!currentPath || currentPath === "/"} style={{ padding: "4px 8px" }}>
-          ↑ 위로
-        </button>
-        <span className="crumb" style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-          {currentPath || "로컬 디스크"}
-        </span>
+      <div className="toolbar pathbar">
+        {breadcrumbs.map((crumb, i) => (
+          <span key={`${crumb.path}-${i}`} style={{ display: "inline-flex", alignItems: "center" }}>
+            {i > 0 && <span className="sep">&nbsp;/&nbsp;</span>}
+            <span className="crumb" onClick={() => onCrumb(crumb.path)}>
+              {crumb.label}
+            </span>
+          </span>
+        ))}
       </div>
 
       {error && (
@@ -153,4 +157,32 @@ export function LocalBrowser({
       </div>
     </div>
   );
+}
+
+function buildLocalBreadcrumbs(path: string): { label: string; path: string }[] {
+  if (!path) return [{ label: "로컬 디스크", path: "" }];
+
+  const isWindows = path.includes("\\");
+  const separator = isWindows ? "\\" : "/";
+  const parts = path.split(/[\\/]/).filter(Boolean);
+
+  if (isWindows) {
+    const drive = parts[0] ?? path;
+    const crumbs = [{ label: drive, path: `${drive}\\` }];
+    for (let i = 1; i < parts.length; i += 1) {
+      crumbs.push({
+        label: parts[i],
+        path: `${parts.slice(0, i + 1).join(separator)}\\`,
+      });
+    }
+    return crumbs;
+  }
+
+  const crumbs = [{ label: "/", path: "/" }];
+  let current = "";
+  for (const part of parts) {
+    current += `/${part}`;
+    crumbs.push({ label: part, path: current });
+  }
+  return crumbs;
 }

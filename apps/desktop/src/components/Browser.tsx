@@ -1,5 +1,5 @@
 import { PointerEvent, useMemo, useState } from "react";
-import { Entry, Storage } from "../types";
+import { Entry } from "../types";
 import { formatBytes } from "./Banner";
 
 interface BreadcrumbNode {
@@ -8,7 +8,6 @@ interface BreadcrumbNode {
 }
 
 interface Props {
-  storage: Storage | null;
   breadcrumb: BreadcrumbNode[];
   entries: Entry[];
   error: string | null;
@@ -40,7 +39,6 @@ const getFileType = (name: string, kind: "file" | "folder") => {
 };
 
 export function Browser({
-  storage,
   breadcrumb,
   entries,
   error,
@@ -102,7 +100,7 @@ export function Browser({
 
   return (
     <div className="browser">
-      <div className="toolbar">
+      <div className="toolbar pathbar">
         {breadcrumb.length === 0 && <span className="crumb">기기 없음</span>}
         {breadcrumb.map((c, i) => (
           <span key={`${c.id}-${i}`} style={{ display: "inline-flex", alignItems: "center" }}>
@@ -112,9 +110,6 @@ export function Browser({
             </span>
           </span>
         ))}
-        <span style={{ marginLeft: "auto", color: "var(--text-dim)" }}>
-          {storage ? `0x${storage.id.toString(16).padStart(8, "0")}` : ""}
-        </span>
       </div>
 
       {error && (
