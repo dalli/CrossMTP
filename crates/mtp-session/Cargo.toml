@@ -1,0 +1,19 @@
+[package]
+name = "mtp-session"
+version.workspace = true
+edition.workspace = true
+description = "Safe Rust wrapper around libmtp for CrossMTP Session Layer"
+
+[lib]
+name = "mtp_session"
+path = "src/lib.rs"
+
+[dependencies]
+thiserror = "1"
+
+[build-dependencies]
+pkg-config = "0.3"
+bindgen = "0.69"
+
+[lints]
+workspace = true

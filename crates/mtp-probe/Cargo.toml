@@ -1,0 +1,15 @@
+[package]
+name = "mtp-probe"
+version.workspace = true
+edition.workspace = true
+description = "Phase 0 CLI prototype: validate libmtp linkage on macOS"
+
+[[bin]]
+name = "mtp-probe"
+path = "src/main.rs"
+
+[build-dependencies]
+pkg-config = "0.3"
+
+[lints]
+workspace = true

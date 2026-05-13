@@ -1,0 +1,16 @@
+[package]
+name = "orchestrator"
+version.workspace = true
+edition.workspace = true
+description = "CrossMTP Transfer Orchestrator: single-active-worker queue, state machine, progress, cancellation"
+
+[lib]
+name = "orchestrator"
+path = "src/lib.rs"
+
+[dependencies]
+mtp-session = { path = "../mtp-session" }
+thiserror = "1"
+
+[lints]
+workspace = true

@@ -1,0 +1,16 @@
+[package]
+name = "mtp-cli"
+version.workspace = true
+edition.workspace = true
+description = "CrossMTP developer CLI exercising mtp-session"
+
+[[bin]]
+name = "mtp-cli"
+path = "src/main.rs"
+
+[dependencies]
+mtp-session = { path = "../mtp-session" }
+orchestrator = { path = "../orchestrator" }
+
+[lints]
+workspace = true

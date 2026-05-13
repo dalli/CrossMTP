@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/mtp-probe",
+    "crates/mtp-session",
+    "crates/orchestrator",
+    "crates/mtp-cli",
+    "apps/desktop/src-tauri",
+]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.75"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "warn"

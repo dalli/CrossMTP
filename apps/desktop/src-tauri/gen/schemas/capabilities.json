@@ -1,0 +1,1 @@
+{"main":{"identifier":"main","description":"Default capability set for the CrossMTP main window.","local":true,"windows":["main"],"permissions":["core:default","core:event:default","dialog:default"]}}
