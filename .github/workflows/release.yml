@@ -1,0 +1,45 @@
+name: "Release macOS"
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  release:
+    permissions:
+      contents: write
+    runs-on: macos-14
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies (macOS)
+        run: |
+          brew install pkg-config libmtp
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install JS dependencies
+        run: npm ci
+        working-directory: apps/desktop
+
+      - name: Build and Release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PKG_CONFIG_PATH: "/opt/homebrew/lib/pkgconfig"
+        with:
+          projectPath: "apps/desktop"
+          tagName: ${{ github.ref_name }} # the tag name that was pushed
+          releaseName: "CrossMTP ${{ github.ref_name }}"
+          releaseBody: "Automated macOS release for CrossMTP."
+          releaseDraft: false
+          prerelease: false
