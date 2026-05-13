@@ -318,6 +318,7 @@ impl Device {
         &self,
         file_id: u32,
         dest: &Path,
+        modified_secs: Option<u64>,
         mut progress: impl FnMut(u64, u64) -> bool,
     ) -> Result<()> {
         let dest_c = path_to_cstring(dest)?;
@@ -346,6 +347,14 @@ impl Device {
         }
         // Reset side channel even on success path.
         CANCEL_OBSERVED.with(|c| c.replace(false));
+
+        if let Some(secs) = modified_secs {
+            if let Ok(file) = std::fs::File::open(dest) {
+                let mtime = std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs);
+                let _ = file.set_times(std::fs::FileTimes::new().set_modified(mtime));
+            }
+        }
+
         Ok(())
     }
 
@@ -470,8 +479,35 @@ impl Device {
         if text.is_empty() {
             None
         } else {
-            Some(MtpError::Device(text.join(" | ")))
+            let joined = text.join(" | ");
+            Some(classify_device_text(joined))
         }
+    }
+}
+
+/// Classify a raw libmtp error-stack text into the most specific
+/// `MtpError` variant we can identify. libmtp emits the PTP response
+/// code (0x2002) and a "PTP Layer" / "USB Layer" prefix for the two
+/// session-fatal cases — we route those into the dedicated variants so
+/// the orchestrator can stop retrying on a dead handle.
+fn classify_device_text(text: String) -> MtpError {
+    let lower = text.to_ascii_lowercase();
+    let looks_ptp = lower.contains("ptp layer")
+        || lower.contains("ptp_layer")
+        || lower.contains("0x2002")
+        || lower.contains("ptp_rc_generalerror")
+        || lower.contains("general error")
+        || lower.contains("session not opened");
+    let looks_usb = lower.contains("usb layer")
+        || lower.contains("usb_layer")
+        || lower.contains("libusb")
+        || lower.contains("broken pipe");
+    if looks_ptp {
+        MtpError::PtpLayer(text)
+    } else if looks_usb {
+        MtpError::UsbLayer(text)
+    } else {
+        MtpError::Device(text)
     }
 }
 

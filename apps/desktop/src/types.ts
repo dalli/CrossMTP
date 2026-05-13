@@ -56,7 +56,8 @@ export type ConflictPolicy = "skip" | "rename" | "overwrite";
 
 export type JobKindView =
   | { kind: "download"; storageId: number; fileId: number; name: string; destDir: string; expectedSize: number }
-  | { kind: "upload"; storageId: number; parentId: number; source: string; name: string };
+  | { kind: "upload"; storageId: number; parentId: number; source: string; name: string }
+  | { kind: "bulkUpload"; storageId: number; parentId: number; source: string; name: string };
 
 export interface JobView {
   id: number;
@@ -65,6 +66,9 @@ export interface JobView {
   sent: number;
   total: number;
   startedAt: number;
+  currentFile?: string;
+  filesDone?: number;
+  totalFiles?: number;
 }
 
 export interface QueueGroupView {
@@ -77,6 +81,7 @@ export type TransferEvent =
   | { type: "enqueued"; id: number; kind: JobKindView }
   | { type: "stateChanged"; id: number; state: JobStateView }
   | { type: "progress"; id: number; sent: number; total: number }
+  | { type: "bulkProgress"; id: number; currentFile: string; filesDone: number; totalFiles: number }
   | { type: "queuePaused"; reason: string }
   | { type: "workerStopped" };
 

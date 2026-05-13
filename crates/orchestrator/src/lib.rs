@@ -74,6 +74,12 @@ pub enum JobKind {
         /// before uploading the file.
         relative_path: Vec<String>,
     },
+    BulkUpload {
+        storage_id: u32,
+        parent_id: u32,
+        source: PathBuf,
+        name: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -126,6 +132,12 @@ pub enum Event {
     Enqueued { id: JobId, kind: JobKind },
     StateChanged { id: JobId, state: JobState },
     Progress { id: JobId, sent: u64, total: u64 },
+    BulkProgress {
+        id: JobId,
+        current_file: String,
+        files_done: u32,
+        total_files: u32,
+    },
     QueuePaused { reason: String },
     WorkerStopped,
 }
@@ -506,11 +518,16 @@ impl Worker {
 
         self.transition(id, JobState::Transferring);
 
-        let cancel_flag = job.cancel.clone();
-        let evt_tx = self.evt_tx.clone();
-        let progress = move |sent: u64, total: u64| -> bool {
-            let _ = evt_tx.send(Event::Progress { id, sent, total });
-            cancel_flag.load(Ordering::SeqCst)
+        // Build a fresh progress closure each retry attempt because the
+        // device callbacks take FnMut by move. `mk_progress` keeps the
+        // capture list explicit and tiny.
+        let mk_progress = || {
+            let cancel_flag = job.cancel.clone();
+            let evt_tx = self.evt_tx.clone();
+            move |sent: u64, total: u64| -> bool {
+                let _ = evt_tx.send(Event::Progress { id, sent, total });
+                cancel_flag.load(Ordering::SeqCst)
+            }
         };
 
         let outcome = match resolved {
@@ -518,19 +535,26 @@ impl Worker {
                 file_id,
                 full_dest,
                 expected_size,
+                modified_secs,
             } => {
                 let download_path = full_dest.clone();
-                let res = self
-                    .device
-                    .as_ref()
-                    .unwrap()
-                    .download_file_with_progress(file_id, &full_dest, progress)
-                    .map(|()| {
-                        let bytes = std::fs::metadata(&full_dest)
-                            .map(|m| m.len())
-                            .unwrap_or(expected_size);
-                        (None, bytes)
-                    });
+                let res = retry_in_place(|| {
+                    self.device
+                        .as_ref()
+                        .unwrap()
+                        .download_file_with_progress(
+                            file_id,
+                            &full_dest,
+                            modified_secs,
+                            mk_progress(),
+                        )
+                })
+                .map(|()| {
+                    let bytes = std::fs::metadata(&full_dest)
+                        .map(|m| m.len())
+                        .unwrap_or(expected_size);
+                    (None, bytes)
+                });
                 // Cleanup any partial bytes left on disk if the user
                 // cancelled or the transfer failed mid-stream. Leaving
                 // half a file would silently mislead a casual user into
@@ -546,12 +570,25 @@ impl Worker {
                 parent_id,
                 name,
                 expected_size,
-            } => self
-                .device
-                .as_ref()
-                .unwrap()
-                .upload_file_with_progress(&source, storage_id, parent_id, &name, progress)
-                .map(|item_id| (Some(item_id), expected_size)),
+            } => retry_in_place(|| {
+                self.device.as_ref().unwrap().upload_file_with_progress(
+                    &source,
+                    storage_id,
+                    parent_id,
+                    &name,
+                    mk_progress(),
+                )
+            })
+            .map(|item_id| (Some(item_id), expected_size)),
+            Resolved::BulkUpload {
+                storage_id,
+                parent_id,
+                source,
+                name,
+            } => {
+                self.execute_bulk_upload(id, job.cancel.clone(), storage_id, parent_id, source, name);
+                return; // execute_bulk_upload handles transition and cleanup
+            }
         };
 
         let mut remove_cancel_registration = true;
@@ -564,17 +601,20 @@ impl Worker {
             }
             Err(e) => {
                 let error_msg = e.to_string();
-                if matches!(
-                    e,
-                    MtpError::Device(_) | MtpError::Connection | MtpError::DeviceLocked
-                ) {
-                    // It's likely a device disconnection. Revert job state, push back to queue, and pause.
+                if e.is_session_dead() {
+                    // Cable disconnect / lockscreen — handle is gone.
+                    // Revert job state, push back to the queue head, and
+                    // pause. UI's reconnect flow calls `update_device`.
                     self.transition(id, JobState::Queued);
                     self.queue.push_front(job);
                     self.paused = true;
                     remove_cancel_registration = false;
                     let _ = self.evt_tx.send(Event::QueuePaused { reason: error_msg });
                 } else {
+                    // session_lost (PTP/USB layer fault) or any other
+                    // error: handle may still be alive (listings keep
+                    // working), so don't lock the queue — just fail this
+                    // job and let the user try something else.
                     self.transition(id, JobState::Failed(error_msg));
                 }
             }
@@ -626,6 +666,7 @@ impl Worker {
                     file_id: *file_id,
                     full_dest: resolved_path,
                     expected_size: *expected_size,
+                    modified_secs: *modified_secs,
                 })
             }
             JobKind::Upload {
@@ -712,6 +753,267 @@ impl Worker {
                     expected_size,
                 })
             }
+            JobKind::BulkUpload {
+                storage_id,
+                parent_id,
+                source,
+                name,
+            } => Ok(Resolved::BulkUpload {
+                storage_id: *storage_id,
+                parent_id: *parent_id,
+                source: source.clone(),
+                name: name.clone(),
+            }),
+        }
+    }
+
+    fn execute_bulk_upload(
+        &mut self,
+        id: JobId,
+        cancel: Arc<AtomicBool>,
+        storage_id: u32,
+        parent_id: u32,
+        source: PathBuf,
+        name: String,
+    ) {
+        // 1. Pre-scan: Total bytes and file count
+        let mut total_bytes = 0;
+        let mut total_files = 0;
+        self.scan_local_dir(&source, &mut total_bytes, &mut total_files);
+
+        // 2. Initial state
+        let mut sent_bytes = 0;
+        let mut files_done = 0;
+
+        self.transition(id, JobState::Transferring);
+
+        let initial_entries = match self.device.as_ref().unwrap().list_entries(storage_id, parent_id) {
+            Ok(entries) => entries,
+            Err(e) => {
+                self.transition(id, JobState::Failed(e.to_string()));
+                return;
+            }
+        };
+
+        // 3. Recursive upload
+        let result = self.bulk_upload_recursive(
+            id,
+            &cancel,
+            storage_id,
+            parent_id,
+            &source,
+            &name,
+            &mut sent_bytes,
+            total_bytes,
+            &mut files_done,
+            total_files,
+            Some(&initial_entries),
+        );
+
+        match result {
+            Ok(()) => {
+                self.transition(id, JobState::Completed { item_id: None, bytes: sent_bytes });
+                self.cancels.lock().unwrap().remove(&id);
+            }
+            Err(MtpError::Cancelled) => {
+                self.transition(id, JobState::Cancelled);
+                self.cancels.lock().unwrap().remove(&id);
+            }
+            Err(e) if e.is_session_dead() => {
+                // Cable disconnect / lockscreen. Pause the queue so the
+                // UI can surface a reconnect prompt; the bulk job itself
+                // is marked Failed (mid-traversal resume requires
+                // checkpointed state, deferred to Step 2).
+                let error_msg = format!(
+                    "{e} — 새로고침 버튼을 눌러 기기를 재연결해주세요"
+                );
+                self.transition(id, JobState::Failed(error_msg.clone()));
+                self.paused = true;
+                let _ = self.evt_tx.send(Event::QueuePaused { reason: error_msg });
+                self.cancels.lock().unwrap().remove(&id);
+            }
+            Err(e) if e.is_session_lost() => {
+                // PTP/USB transaction desync (e.g. 0x2002 on first
+                // Send_File). Handle may still be alive — don't lock
+                // the whole queue; let the user try other paths.
+                let error_msg = format!(
+                    "{e} — 다른 위치/파일로 시도하거나 폰의 USB 모드와 권한을 확인해주세요"
+                );
+                self.transition(id, JobState::Failed(error_msg));
+                self.cancels.lock().unwrap().remove(&id);
+            }
+            Err(e) => {
+                self.transition(id, JobState::Failed(e.to_string()));
+                self.cancels.lock().unwrap().remove(&id);
+            }
+        }
+    }
+
+    fn scan_local_dir(&self, path: &std::path::Path, total_bytes: &mut u64, total_files: &mut u32) {
+        let Ok(meta) = std::fs::metadata(path) else { return; };
+        if meta.is_file() {
+            *total_bytes += meta.len();
+            *total_files += 1;
+        } else if meta.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(path) {
+                for entry in entries.flatten() {
+                    self.scan_local_dir(&entry.path(), total_bytes, total_files);
+                }
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn bulk_upload_recursive(
+        &mut self,
+        id: JobId,
+        cancel: &Arc<AtomicBool>,
+        storage_id: u32,
+        parent_id: u32,
+        local_path: &std::path::Path,
+        target_name: &str,
+        sent_bytes: &mut u64,
+        total_bytes: u64,
+        files_done: &mut u32,
+        total_files: u32,
+        parent_entries: Option<&[Entry]>,
+    ) -> Result<(), MtpError> {
+        if cancel.load(Ordering::SeqCst) { return Err(MtpError::Cancelled); }
+
+        let meta = std::fs::metadata(local_path).map_err(|e| MtpError::Device(e.to_string()))?;
+        
+        if meta.is_file() {
+            let local_size = meta.len();
+            let local_modified = metadata_modified_secs(&meta);
+
+            // Check if identical file already exists on MTP using cached entries
+            let already_exists = if let Some(entries) = parent_entries {
+                entries.iter().any(|e| {
+                    e.kind == EntryKind::File && 
+                    e.name == target_name && 
+                    e.size == local_size && 
+                    timestamps_match(local_modified, e.modified_secs)
+                })
+            } else {
+                false
+            };
+
+            if already_exists {
+                *sent_bytes += local_size;
+                *files_done += 1;
+                let _ = self.evt_tx.send(Event::Progress {
+                    id,
+                    sent: *sent_bytes,
+                    total: total_bytes,
+                });
+                return Ok(());
+            }
+
+            let _ = self.evt_tx.send(Event::BulkProgress {
+                id,
+                current_file: target_name.to_string(),
+                files_done: *files_done,
+                total_files,
+            });
+
+            let base_sent = *sent_bytes;
+            let mk_progress = || {
+                let evt_tx = self.evt_tx.clone();
+                let cancel_clone = cancel.clone();
+                move |sent: u64, _| -> bool {
+                    let _ = evt_tx.send(Event::Progress {
+                        id,
+                        sent: base_sent + sent,
+                        total: total_bytes,
+                    });
+                    cancel_clone.load(Ordering::SeqCst)
+                }
+            };
+
+            retry_in_place(|| {
+                self.device.as_ref().unwrap().upload_file_with_progress(
+                    local_path,
+                    storage_id,
+                    parent_id,
+                    target_name,
+                    mk_progress(),
+                )
+            })?;
+
+            *sent_bytes += local_size;
+            *files_done += 1;
+            // Inter-file breath: some devices (notably Samsung One UI 6,
+            // Pixel Android 14+) drop PTP responses when hammered with
+            // back-to-back Send_File calls. 25ms is below the human
+            // perception threshold for thousands of files but enough to
+            // let the device drain its response queue.
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            Ok(())
+        } else {
+            // Directory: fetch entries ONCE for this directory level.
+            // On miss we create the folder, then force a `list_entries`
+            // round-trip on the *new* folder before recursing — some
+            // Android stacks (Xiaomi HyperOS, observed first-hand) reject
+            // `Send_File_From_File` with PTP 0x2002 if the parent object
+            // was created in the same session but no `GetObjectHandles`
+            // request has flushed the device-side object tree yet.
+            let device = self.device.as_ref().unwrap();
+            let resolve_existing = |e: &Entry| -> Result<(u32, Vec<Entry>), MtpError> {
+                let sub = device.list_entries(storage_id, e.item_id)?;
+                // Brief settle window after listing an existing folder
+                // before issuing the first Send_File. Xiaomi HyperOS has
+                // been observed to NACK send_file_object_info with PTP
+                // 0x2002 when it lands on the wire too soon after a
+                // GetObjectHandles + multiple GetObjectInfo storm on a
+                // folder that already holds many children. The new-folder
+                // path already pays this cost via the post-create sleep.
+                std::thread::sleep(std::time::Duration::from_millis(80));
+                Ok((e.item_id, sub))
+            };
+            let create_and_sync = |parent: u32| -> Result<(u32, Vec<Entry>), MtpError> {
+                let new_id = device.create_folder(target_name, parent, storage_id)?;
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                // GetObjectHandles on the freshly-created folder forces the
+                // device to commit it before we try to write children.
+                // Tolerate listing failures here: an empty result is the
+                // common case, but a transient device hiccup shouldn't
+                // abort the whole bulk upload.
+                let sub = device.list_entries(storage_id, new_id).unwrap_or_default();
+                Ok((new_id, sub))
+            };
+            let (mtp_dir_id, entries) = if let Some(entries) = parent_entries {
+                match entries.iter().find(|e| e.kind == EntryKind::Folder && e.name == target_name) {
+                    Some(e) => resolve_existing(e)?,
+                    None => create_and_sync(parent_id)?,
+                }
+            } else {
+                let parent_list = device.list_entries(storage_id, parent_id)?;
+                match parent_list.iter().find(|e| e.kind == EntryKind::Folder && e.name == target_name) {
+                    Some(e) => resolve_existing(e)?,
+                    None => create_and_sync(parent_id)?,
+                }
+            };
+
+            if let Ok(read_dir) = std::fs::read_dir(local_path) {
+                for entry in read_dir.flatten() {
+                    let sub_path = entry.path();
+                    let sub_name = sub_path.file_name().unwrap().to_string_lossy().into_owned();
+                    self.bulk_upload_recursive(
+                        id,
+                        cancel,
+                        storage_id,
+                        mtp_dir_id,
+                        &sub_path,
+                        &sub_name,
+                        sent_bytes,
+                        total_bytes,
+                        files_done,
+                        total_files,
+                        Some(&entries),
+                    )?;
+                }
+            }
+            Ok(())
         }
     }
 
@@ -725,6 +1027,7 @@ enum Resolved {
         file_id: u32,
         full_dest: PathBuf,
         expected_size: u64,
+        modified_secs: Option<u64>,
     },
     Upload {
         source: PathBuf,
@@ -733,6 +1036,37 @@ enum Resolved {
         name: String,
         expected_size: u64,
     },
+    BulkUpload {
+        storage_id: u32,
+        parent_id: u32,
+        source: PathBuf,
+        name: String,
+    },
+}
+
+/// Retry a libmtp call on the same device handle up to two extra times
+/// when the failure is classified as a transient device-reported error.
+/// Session-broken errors and caller-side errors (`Cancelled`,
+/// `InvalidArgument`, `Io`) are returned immediately so the worker can
+/// route them to pause-the-queue or fail-fast paths.
+fn retry_in_place<T, F>(mut op: F) -> Result<T, MtpError>
+where
+    F: FnMut() -> Result<T, MtpError>,
+{
+    const MAX_RETRIES: u32 = 2;
+    let mut attempts: u32 = 0;
+    loop {
+        match op() {
+            Ok(v) => return Ok(v),
+            Err(e) if e.is_retryable_in_place() && attempts < MAX_RETRIES => {
+                attempts += 1;
+                let backoff_ms = 250u64 * (1u64 << (attempts - 1)); // 250, 500
+                std::thread::sleep(std::time::Duration::from_millis(backoff_ms));
+                continue;
+            }
+            Err(e) => return Err(e),
+        }
+    }
 }
 
 fn unique_local_path(dir: &std::path::Path, name: &str) -> PathBuf {

@@ -1,3 +1,4 @@
+import { useMemo, useState } from "react";
 import { ConflictPolicy, DeviceSnapshot } from "../types";
 
 interface Props {
@@ -17,39 +18,42 @@ export function Banner({
   onRefresh,
   onConflictChange,
 }: Props) {
+  const [showNotifications, setShowNotifications] = useState(true);
   const connected = !!(snapshot && snapshot.devices.length > 0 && snapshot.storages.length > 0);
   const device = snapshot?.devices[0];
   const storage = snapshot?.storages[0];
+  const notification = useMemo(() => {
+    const title = connected
+      ? `${device?.manufacturer ?? ""} ${device?.model ?? ""}`.trim() || "기기 연결됨"
+      : "기기 없음";
+    const lines = [
+      connected && storage
+        ? `${storage.description ?? ""} · ${formatBytes(storage.freeBytes)} 여유 / ${formatBytes(storage.maxBytes)}`
+        : snapshot?.error
+          ? snapshot.error
+          : "Android 폰을 USB로 연결한 뒤 폰에서 'MTP / 파일 전송'을 선택하세요.",
+    ];
+
+    if (snapshot?.permissionHint && !connected) {
+      lines.push(
+        "힌트: macOS의 Image Capture / Android File Transfer가 USB를 잡고 있으면 인식되지 않습니다. 해당 앱을 종료하고 새로고침해주세요.",
+      );
+    }
+    lines.push(...envHints.map((hint) => `⚠ ${hint}`));
+
+    return { title, lines };
+  }, [connected, device?.manufacturer, device?.model, envHints, snapshot?.error, snapshot?.permissionHint, storage]);
 
   return (
-    <div className={`banner ${connected ? "connected" : "disconnected"}`}>
-      <span className="dot" />
-      <div>
-        <div>
-          {connected
-            ? `${device?.manufacturer ?? ""} ${device?.model ?? ""}`.trim() || "기기 연결됨"
-            : "기기 없음"}
-        </div>
-        <div className="meta">
-          {connected && storage
-            ? `${storage.description ?? ""} · ${formatBytes(storage.freeBytes)} 여유 / ${formatBytes(storage.maxBytes)}`
-            : snapshot?.error
-              ? snapshot.error
-              : "Android 폰을 USB로 연결한 뒤 폰에서 'MTP / 파일 전송'을 선택하세요."}
-        </div>
-        {snapshot?.permissionHint && !connected && (
-          <div className="meta" style={{ color: "var(--warn)", marginTop: 4 }}>
-            힌트: macOS의 Image Capture / Android File Transfer가 USB를 잡고 있으면 인식되지 않습니다.
-            해당 앱을 종료하고 새로고침해주세요.
-          </div>
-        )}
-        {envHints.map((h, i) => (
-          <div key={i} className="meta" style={{ color: "var(--warn)", marginTop: 4 }}>
-            ⚠ {h}
-          </div>
-        ))}
-      </div>
-      <div className="actions">
+    <>
+      <div className="app-menu">
+        <button
+          aria-expanded={showNotifications}
+          className={showNotifications ? "active" : ""}
+          onClick={() => setShowNotifications((visible) => !visible)}
+        >
+          알림
+        </button>
         <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--text-dim)" }}>
           충돌 시
           <select
@@ -72,7 +76,27 @@ export function Banner({
           {loading ? "..." : "새로고침"}
         </button>
       </div>
-    </div>
+      {showNotifications && (
+        <div className={`banner ${connected ? "connected" : "disconnected"}`} role="status">
+          <span className="dot" />
+          <div className="notification-copy">
+            <div>{notification.title}</div>
+            {notification.lines.map((line, i) => (
+              <div key={`${line}-${i}`} className="meta">
+                {line}
+              </div>
+            ))}
+          </div>
+          <button
+            aria-label="알림 닫기"
+            className="icon-button"
+            onClick={() => setShowNotifications(false)}
+          >
+            x
+          </button>
+        </div>
+      )}
+    </>
   );
 }
 

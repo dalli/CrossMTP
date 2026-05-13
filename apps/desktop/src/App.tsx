@@ -1,4 +1,13 @@
-import { Dispatch, SetStateAction, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Dispatch,
+  PointerEvent as ReactPointerEvent,
+  SetStateAction,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { ask } from "@tauri-apps/plugin-dialog";
@@ -63,34 +72,57 @@ export function App() {
   const internalDragRef = useRef<InternalDrag | null>(null);
   internalDragRef.current = internalDrag;
   const [leftWidth, setLeftWidth] = useState(50);
+  const [queueHeight, setQueueHeight] = useState(190);
+  const mainRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const localPaneRef = useRef<HTMLDivElement>(null);
   const devicePaneRef = useRef<HTMLDivElement>(null);
 
-  const startResize = useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    const startX = e.pageX;
+  const startHorizontalResize = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const startX = event.clientX;
     const startWidth = leftWidth;
 
-    const onMouseMove = (moveEvent: MouseEvent) => {
+    const onPointerMove = (moveEvent: PointerEvent) => {
       if (!containerRef.current) return;
       const containerWidth = containerRef.current.clientWidth;
-      const deltaX = moveEvent.pageX - startX;
+      const deltaX = moveEvent.clientX - startX;
       const deltaPct = (deltaX / containerWidth) * 100;
-      let newWidth = startWidth + deltaPct;
-      if (newWidth < 20) newWidth = 20;
-      if (newWidth > 80) newWidth = 80;
-      setLeftWidth(newWidth);
+      setLeftWidth(clamp(startWidth + deltaPct, 20, 80));
     };
 
-    const onMouseUp = () => {
-      document.removeEventListener("mousemove", onMouseMove);
-      document.removeEventListener("mouseup", onMouseUp);
+    const onPointerUp = () => {
+      document.removeEventListener("pointermove", onPointerMove);
+      document.removeEventListener("pointerup", onPointerUp);
     };
 
-    document.addEventListener("mousemove", onMouseMove);
-    document.addEventListener("mouseup", onMouseUp);
+    document.addEventListener("pointermove", onPointerMove);
+    document.addEventListener("pointerup", onPointerUp);
   }, [leftWidth]);
+
+  const startVerticalResize = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const startY = event.clientY;
+    const startHeight = queueHeight;
+
+    const onPointerMove = (moveEvent: PointerEvent) => {
+      if (!mainRef.current) return;
+      const mainHeight = mainRef.current.clientHeight;
+      const deltaY = startY - moveEvent.clientY;
+      const maxQueueHeight = Math.max(150, mainHeight - 240);
+      setQueueHeight(clamp(startHeight + deltaY, 120, maxQueueHeight));
+    };
+
+    const onPointerUp = () => {
+      document.removeEventListener("pointermove", onPointerMove);
+      document.removeEventListener("pointerup", onPointerUp);
+    };
+
+    document.addEventListener("pointermove", onPointerMove);
+    document.addEventListener("pointerup", onPointerUp);
+  }, [queueHeight]);
 
   const refresh = useCallback(async (force = false) => {
     setLoading(true);
@@ -152,21 +184,9 @@ export function App() {
     loadLocalEntries(entry.path);
   }, [loadLocalEntries]);
 
-  const goLocalUp = useCallback(() => {
-    const isWindows = localPath.includes("\\");
-    const sep = isWindows ? "\\" : "/";
-    const parts = localPath.split(sep).filter(Boolean);
-    if (parts.length > 0) {
-      if (!isWindows && parts.length === 1) {
-        loadLocalEntries("/");
-      } else {
-        const newPath = (isWindows ? "" : "/") + parts.slice(0, -1).join(sep);
-        loadLocalEntries(newPath);
-      }
-    } else if (!isWindows) {
-      loadLocalEntries("/");
-    }
-  }, [localPath, loadLocalEntries]);
+  const goToLocalCrumb = useCallback((path: string) => {
+    if (path) loadLocalEntries(path);
+  }, [loadLocalEntries]);
 
   const loadEntries = useCallback(async (storageId: number, parentId: number) => {
     try {
@@ -422,25 +442,35 @@ export function App() {
         onConflictChange={setConflictPolicy}
         envHints={envHints}
       />
-      <div className="main" style={{ display: "flex", flexDirection: "column" }}>
-        <div className="panes" ref={containerRef} style={{ display: "flex", flex: 1, overflow: "hidden", padding: "10px" }}>
-          <div ref={localPaneRef} style={{ flex: `0 0 ${leftWidth}%`, display: "flex", minWidth: 0, paddingRight: "5px" }}>
+      <div
+        className="main"
+        ref={mainRef}
+        style={{ gridTemplateRows: `minmax(220px, 1fr) 8px minmax(120px, ${queueHeight}px)` }}
+      >
+        <div
+          className="panes"
+          ref={containerRef}
+          style={{ gridTemplateColumns: `minmax(260px, ${leftWidth}%) 8px minmax(260px, 1fr)` }}
+        >
+          <div className="pane" ref={localPaneRef}>
             <LocalBrowser
               currentPath={localPath}
               entries={localEntries}
               error={localError}
               onEnter={enterLocalFolder}
-              onUp={goLocalUp}
+              onCrumb={goToLocalCrumb}
               onDragItem={startLocalDrag}
             />
           </div>
           <div
-            className="resizer"
-            onMouseDown={startResize}
+            aria-label="PC와 Android 패널 너비 조절"
+            aria-orientation="vertical"
+            className="resizer horizontal"
+            onPointerDown={startHorizontalResize}
+            role="separator"
           />
-          <div ref={devicePaneRef} style={{ flex: 1, display: "flex", minWidth: 0, paddingLeft: "5px" }}>
+          <div className="pane" ref={devicePaneRef}>
             <Browser
-              storage={activeStorage}
               breadcrumb={breadcrumb}
               entries={entries}
               error={browserError}
@@ -450,6 +480,13 @@ export function App() {
             />
           </div>
         </div>
+        <div
+          aria-label="파일 패널과 전송 큐 높이 조절"
+          aria-orientation="horizontal"
+          className="resizer vertical"
+          onPointerDown={startVerticalResize}
+          role="separator"
+        />
         {internalDrag && (
           <div className="drag-ghost" style={{ left: internalDrag.x + 12, top: internalDrag.y + 12 }}>
             <span>{internalDrag.type === "local" ? "↑" : "↓"}</span>
@@ -487,6 +524,10 @@ function basename(path: string): string {
   return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
 }
 
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
 function pointInElement(point: { x: number; y: number }, element: HTMLElement | null): boolean {
   if (!element) return false;
   const rect = element.getBoundingClientRect();
@@ -518,6 +559,18 @@ function applyEvent(prev: Map<number, JobView>, ev: TransferEvent): Map<number, 
       const job = next.get(ev.id);
       if (job) {
         next.set(ev.id, { ...job, sent: ev.sent, total: ev.total });
+      }
+      break;
+    }
+    case "bulkProgress": {
+      const job = next.get(ev.id);
+      if (job) {
+        next.set(ev.id, {
+          ...job,
+          currentFile: ev.currentFile,
+          filesDone: ev.filesDone,
+          totalFiles: ev.totalFiles,
+        });
       }
       break;
     }

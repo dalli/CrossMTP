@@ -53,9 +53,23 @@ button.primary { background: var(--accent); border-color: var(--accent); color: 
 button.primary:hover { background: #1a8cff; }
 button.danger { background: transparent; border-color: var(--err); color: var(--err); }
 
-.banner {
+.app-menu {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+.app-menu button.active {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.banner {
+  display: flex;
+  align-items: flex-start;
   gap: 12px;
   padding: 10px 16px;
   border-bottom: 1px solid var(--border);
@@ -66,32 +80,64 @@ button.danger { background: transparent; border-color: var(--err); color: var(--
   width: 10px;
   height: 10px;
   border-radius: 50%;
+  flex-shrink: 0;
+  margin-top: 4px;
 }
 .banner.connected .dot { background: var(--ok); }
 .banner.disconnected .dot { background: var(--err); }
 .banner .meta { color: var(--text-dim); font-size: 12px; }
-.banner .actions { margin-left: auto; display: flex; gap: 8px; }
+.banner.disconnected .meta:not(:first-child) { color: var(--warn); }
+.notification-copy {
+  min-width: 0;
+  flex: 1;
+}
+.icon-button {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  flex-shrink: 0;
+}
 
 .main {
   flex: 1;
-  display: flex;
-  flex-direction: column;
+  display: grid;
   min-height: 0;
+  overflow: hidden;
 }
 
 .panes {
-  flex: 1;
-  display: flex;
+  display: grid;
   overflow: hidden;
   padding: 12px;
+  min-height: 0;
+  min-width: 0;
+}
+
+.pane {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .resizer {
-  width: 8px;
-  cursor: col-resize;
   background: transparent;
   flex-shrink: 0;
   transition: background 0.2s;
+  z-index: 2;
+  touch-action: none;
+}
+
+.resizer.horizontal {
+  width: 8px;
+  cursor: col-resize;
+}
+
+.resizer.vertical {
+  height: 8px;
+  cursor: row-resize;
+  border-top: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
 }
 
 .resizer:hover, .resizer:active {
@@ -105,6 +151,8 @@ button.danger { background: transparent; border-color: var(--err); color: var(--
   display: flex;
   flex-direction: column;
   min-height: 0;
+  min-width: 0;
+  overflow: hidden;
   background: var(--bg-elevated);
 }
 
@@ -117,17 +165,47 @@ button.danger { background: transparent; border-color: var(--err); color: var(--
   font-size: 12px;
   color: var(--text-dim);
 }
+.toolbar.pathbar {
+  gap: 0;
+  overflow-x: auto;
+  white-space: nowrap;
+}
 .toolbar .crumb {
   cursor: pointer;
   color: var(--accent);
+  flex-shrink: 0;
 }
 .toolbar .crumb:hover { text-decoration: underline; }
 .toolbar .sep { color: var(--text-dim); }
 
 .entries {
   flex: 1;
-  overflow-y: auto;
+  min-height: 0;
+  min-width: 0;
+  overflow: auto;
 }
+.table-header {
+  display: flex;
+  align-items: center;
+  padding: 6px 12px;
+  background: var(--bg-row);
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  gap: 8px;
+}
+.table-header .col {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.table-header .col:hover { color: var(--text); }
+.table-header .col.active { color: var(--accent); }
+
 .entry {
   display: flex;
   align-items: center;
@@ -136,11 +214,17 @@ button.danger { background: transparent; border-color: var(--err); color: var(--
   cursor: grab;
   gap: 8px;
   touch-action: none;
+  font-size: 13px;
 }
 .entry:active { cursor: grabbing; }
 .entry:hover { background: var(--bg-row); }
 .entry .icon { text-align: center; width: 24px; flex-shrink: 0; }
-.entry .size { color: var(--text-dim); font-size: 12px; text-align: right; flex-shrink: 0; min-width: 80px; }
+
+.col-name { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; overflow: hidden; }
+.col-name span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.col-type { width: 80px; flex-shrink: 0; color: var(--text-dim); font-size: 12px; }
+.col-date { width: 140px; flex-shrink: 0; color: var(--text-dim); font-size: 12px; }
+.col-size { width: 80px; flex-shrink: 0; color: var(--text-dim); font-size: 12px; text-align: right; }
 
 .dropzone {
   margin: 8px 12px;
@@ -157,11 +241,10 @@ button.danger { background: transparent; border-color: var(--err); color: var(--
 .queue {
   display: flex;
   flex-direction: column;
-  flex: 0 0 190px;
-  min-height: 150px;
-  max-height: 35vh;
+  min-height: 0;
   border-top: 1px solid var(--border);
   background: var(--bg);
+  overflow: hidden;
 }
 .queue-header {
   padding: 12px 16px;

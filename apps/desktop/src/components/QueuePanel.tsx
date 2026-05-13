@@ -18,6 +18,13 @@ interface QueueRow {
   total: number;
   reason?: string;
   startedAt: number;
+  /** BulkUpload-specific progress (files-done / total-files / current
+   * file) sourced from `bulkProgress` events. Small files often skip
+   * libmtp's byte-level progress callback entirely, so this is the
+   * only visible signal of forward motion for directory uploads. */
+  bulkFilesDone?: number;
+  bulkTotalFiles?: number;
+  bulkCurrentFile?: string;
 }
 
 export function QueuePanel({ jobs, groups, onCancel }: Props) {
@@ -38,9 +45,28 @@ export function QueuePanel({ jobs, groups, onCancel }: Props) {
           <div className="queue-empty">대기 중인 전송 작업이 없습니다.</div>
         )}
         {rows.map((row) => {
-          const progressPct =
-            row.total > 0 ? Math.min(100, Math.floor((row.sent / row.total) * 100)) : row.stateTag === "completed" ? 100 : 0;
-          const completedFiles = row.jobs.filter((job) => job.state.tag === "completed").length;
+          // For bulk uploads (single job that internally walks many
+          // files), prefer the file-count progress from `bulkProgress`
+          // events because small files often skip libmtp's byte-level
+          // callback and `row.sent` barely moves.
+          const useBulkProgress =
+            row.bulkTotalFiles !== undefined && row.bulkTotalFiles > 0;
+          const progressPct = useBulkProgress
+            ? Math.min(
+                100,
+                Math.floor(((row.bulkFilesDone ?? 0) / (row.bulkTotalFiles ?? 1)) * 100),
+              )
+            : row.total > 0
+              ? Math.min(100, Math.floor((row.sent / row.total) * 100))
+              : row.stateTag === "completed"
+                ? 100
+                : 0;
+          const completedFiles = useBulkProgress
+            ? row.bulkFilesDone ?? 0
+            : row.jobs.filter((job) => job.state.tag === "completed").length;
+          const totalFilesShown = useBulkProgress
+            ? row.bulkTotalFiles ?? row.totalFiles
+            : row.totalFiles;
           const active = row.jobs.filter((job) => !isTerminal(job.state.tag));
 
           return (
@@ -55,15 +81,23 @@ export function QueuePanel({ jobs, groups, onCancel }: Props) {
                 <div className={`state ${row.stateTag}`}>{row.stateLabel}</div>
               </div>
               <div className="meta">
-                {row.totalFiles > 1 && (
+                {totalFilesShown > 1 && (
                   <span>
-                    {completedFiles}/{row.totalFiles} 파일 완료
+                    {completedFiles}/{totalFilesShown} 파일 완료
                   </span>
                 )}
-                {row.stateTag === "transferring" && row.total > 0 && (
+                {row.stateTag === "transferring" && (row.total > 0 || useBulkProgress) && (
                   <span>
-                    {row.totalFiles > 1 ? " · " : ""}
-                    {progressPct}% ({formatBytes(row.sent)} / {formatBytes(row.total)})
+                    {totalFilesShown > 1 ? " · " : ""}
+                    {progressPct}%
+                    {row.total > 0 && (
+                      <> ({formatBytes(row.sent)} / {formatBytes(row.total)})</>
+                    )}
+                  </span>
+                )}
+                {row.stateTag === "transferring" && row.bulkCurrentFile && (
+                  <span className="current-file" title={row.bulkCurrentFile}>
+                    {" · "}현재: {row.bulkCurrentFile}
                   </span>
                 )}
                 {row.stateTag === "completed" && row.totalFiles === 1 && row.jobs[0].state.bytes !== undefined && (
@@ -114,8 +148,13 @@ function buildRows(jobs: JobView[], groups: Map<number, QueueGroupView>): QueueR
 
 function makeRow(key: string, jobs: JobView[], group?: QueueGroupView): QueueRow {
   const first = jobs[0];
-  const totalFiles = group?.totalFiles ?? jobs.length;
-  const label = group ? `${group.label} (${totalFiles}개 파일)` : first.kind.name;
+  const bulk = jobs.find((j) => j.kind.kind === "bulkUpload");
+  const totalFiles = group?.totalFiles ?? bulk?.totalFiles ?? jobs.length;
+  const label = group
+    ? `${group.label} (${totalFiles}개 파일)`
+    : bulk && bulk.totalFiles
+      ? `${first.kind.name} (${bulk.totalFiles}개 파일)`
+      : first.kind.name;
   const sent = jobs.reduce((sum, job) => sum + job.sent, 0);
   const total = jobs.reduce((sum, job) => sum + job.total, 0);
   const stateTag = deriveState(jobs);
@@ -123,7 +162,7 @@ function makeRow(key: string, jobs: JobView[], group?: QueueGroupView): QueueRow
   return {
     key,
     label,
-    direction: first.kind.kind,
+    direction: first.kind.kind === "bulkUpload" ? "upload" : first.kind.kind,
     jobs,
     totalFiles,
     stateTag,
@@ -132,6 +171,9 @@ function makeRow(key: string, jobs: JobView[], group?: QueueGroupView): QueueRow
     total,
     reason: jobs.find((job) => job.state.reason)?.state.reason,
     startedAt: Math.max(...jobs.map((job) => job.startedAt)),
+    bulkFilesDone: bulk?.filesDone,
+    bulkTotalFiles: bulk?.totalFiles,
+    bulkCurrentFile: bulk?.currentFile,
   };
 }
 
