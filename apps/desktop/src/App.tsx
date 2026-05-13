@@ -521,6 +521,18 @@ function applyEvent(prev: Map<number, JobView>, ev: TransferEvent): Map<number, 
       }
       break;
     }
+    case "bulkProgress": {
+      const job = next.get(ev.id);
+      if (job) {
+        next.set(ev.id, {
+          ...job,
+          currentFile: ev.currentFile,
+          filesDone: ev.filesDone,
+          totalFiles: ev.totalFiles,
+        });
+      }
+      break;
+    }
     case "queuePaused":
     case "workerStopped":
       break;

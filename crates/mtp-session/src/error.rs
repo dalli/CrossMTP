@@ -33,6 +33,18 @@ pub enum MtpError {
     #[error("MTP connection error")]
     Connection,
 
+    /// PTP layer fault (LIBMTP_ERROR_PTP_LAYER, response code 0x2002, etc.).
+    /// The device session is effectively dead — the only safe recovery is
+    /// to release and reopen the libmtp device handle. Common on large
+    /// directory uploads when the device PTP response queue drifts.
+    #[error("device PTP session lost: {0}")]
+    PtpLayer(String),
+
+    /// USB layer fault (LIBMTP_ERROR_USB_LAYER). Cable jiggle / device
+    /// reset. Recovery same as `PtpLayer`.
+    #[error("device USB session lost: {0}")]
+    UsbLayer(String),
+
     /// Transfer didn't complete and we could not extract a meaningful
     /// device-side error.
     #[error("transfer failed")]
@@ -63,8 +75,8 @@ impl MtpError {
         match code {
             0 => MtpError::Device("LIBMTP_ERROR_NONE returned in error path".into()),
             1 => MtpError::Device("general libmtp error".into()),
-            2 => MtpError::Device("PTP layer error".into()),
-            3 => MtpError::Device("USB layer error".into()),
+            2 => MtpError::PtpLayer("LIBMTP_ERROR_PTP_LAYER".into()),
+            3 => MtpError::UsbLayer("LIBMTP_ERROR_USB_LAYER".into()),
             4 => MtpError::Device("memory allocation".into()),
             5 => MtpError::NoDevice,
             6 => MtpError::Device("storage full".into()),
@@ -79,6 +91,46 @@ impl MtpError {
         matches!(
             self,
             MtpError::DeviceLocked | MtpError::StorageUnavailable | MtpError::Connection
+        )
+    }
+
+    /// True when the libmtp/PTP session is no longer usable and the only
+    /// safe recovery is reopening the device handle. Used by the orchestrator
+    /// to stop retrying on a dead handle and pause the queue instead.
+    pub fn is_session_broken(&self) -> bool {
+        self.is_session_dead() || self.is_session_lost()
+    }
+
+    /// Handle-is-dead errors: the device is gone or refusing communication
+    /// at the USB/PTP-init level. Listing/transfers cannot succeed until
+    /// the user reconnects the cable or unlocks the phone. The orchestrator
+    /// pauses the queue and waits for the UI's reconnect path to update
+    /// the device handle.
+    pub fn is_session_dead(&self) -> bool {
+        matches!(
+            self,
+            MtpError::Connection | MtpError::NoDevice | MtpError::DeviceLocked
+        )
+    }
+
+    /// Transaction-state-desync errors: handle is still open (listing can
+    /// still work), but a specific PTP/USB operation was refused. Common
+    /// when the device rejects a write (storage permission, scoped-storage,
+    /// first `Send_File` with a stale parent id). Retrying the same job
+    /// will likely fail the same way, but other operations may still
+    /// succeed — so the orchestrator should fail the job without pausing
+    /// the entire queue.
+    pub fn is_session_lost(&self) -> bool {
+        matches!(self, MtpError::PtpLayer(_) | MtpError::UsbLayer(_))
+    }
+
+    /// True when a retry on the same handle has a realistic chance of
+    /// succeeding (transient device-reported errors, generic transfer
+    /// failures). Session-broken errors and caller-side errors return false.
+    pub fn is_retryable_in_place(&self) -> bool {
+        matches!(
+            self,
+            MtpError::Device(_) | MtpError::TransferFailed | MtpError::StorageUnavailable
         )
     }
 }

@@ -79,6 +79,12 @@ enum WireEvent {
     Enqueued { id: u64, kind: WireKind },
     StateChanged { id: u64, state: WireState },
     Progress { id: u64, sent: u64, total: u64 },
+    BulkProgress {
+        id: u64,
+        current_file: String,
+        files_done: u32,
+        total_files: u32,
+    },
     QueuePaused { reason: String },
     WorkerStopped,
 }
@@ -94,6 +100,12 @@ enum WireKind {
         expected_size: u64,
     },
     Upload {
+        storage_id: u32,
+        parent_id: u32,
+        source: String,
+        name: String,
+    },
+    BulkUpload {
         storage_id: u32,
         parent_id: u32,
         source: String,
@@ -125,6 +137,17 @@ impl From<JobKind> for WireKind {
                 name,
                 relative_path: _,
             } => WireKind::Upload {
+                storage_id,
+                parent_id,
+                source: source.to_string_lossy().into_owned(),
+                name,
+            },
+            JobKind::BulkUpload {
+                storage_id,
+                parent_id,
+                source,
+                name,
+            } => WireKind::BulkUpload {
                 storage_id,
                 parent_id,
                 source: source.to_string_lossy().into_owned(),
@@ -585,137 +608,48 @@ fn download_dir_recursive(
 }
 
 #[tauri::command]
-fn enqueue_upload(
+async fn enqueue_upload(
     storage_id: u32,
     parent_id: u32,
     source: String,
     conflict: WireConflict,
     state: State<'_, AppState>,
 ) -> Result<Vec<u64>, String> {
-    let guard = state.inner.lock().unwrap();
-    let bridge = guard.as_ref().ok_or("기기가 연결되지 않았습니다.")?;
+    let orch = state.orchestrator.clone();
     let source = PathBuf::from(source);
     let conflict: ConflictPolicy = conflict.into();
 
-    let metadata =
-        std::fs::metadata(&source).map_err(|e| format!("파일 정보를 읽을 수 없습니다: {e}"))?;
-
-    // Single file path — unchanged behaviour.
-    if metadata.is_file() {
-        let name = source
-            .file_name()
-            .ok_or("업로드 경로에 파일명이 없습니다.")?
-            .to_string_lossy()
-            .into_owned();
-        let id = bridge.orchestrator.enqueue(JobSpec {
-            kind: JobKind::Upload {
-                storage_id,
-                parent_id,
-                source,
-                name,
-                relative_path: vec![],
-            },
-            conflict,
-        });
-        return Ok(vec![id.0]);
-    }
-
-    // Directory: recursive expansion preserving tree shape.
-    if metadata.is_dir() {
-        let mut ids = Vec::new();
-        upload_dir_recursive(
-            bridge,
-            storage_id,
-            parent_id,
-            &source,
-            vec![],
-            conflict,
-            &mut ids,
-        )?;
-        if ids.is_empty() {
-            return Err(format!(
-                "'{}' 안에 업로드할 파일이 없습니다.",
-                source.display()
-            ));
-        }
-        return Ok(ids);
-    }
-
-    Err(format!(
-        "지원하지 않는 항목입니다 (심볼릭 링크/특수 파일): {}",
-        source.display()
-    ))
-}
-
-/// Walk a local directory, creating matching folders on the device (or
-/// merging with existing same-name folders) and enqueuing every file as
-/// a separate upload job. All file jobs share the caller's conflict
-/// policy. Folder collisions are always merged — never auto-renamed —
-/// because auto-renaming a parent directory would split a logically
-/// single upload into two unrelated trees.
-fn upload_dir_recursive(
-    bridge: &DeviceBridge,
-    storage_id: u32,
-    base_parent_id: u32,
-    local_dir: &std::path::Path,
-    relative_path: Vec<String>,
-    conflict: ConflictPolicy,
-    out_ids: &mut Vec<u64>,
-) -> Result<(), String> {
-    let folder_name = local_dir
+    let name = source
         .file_name()
-        .ok_or_else(|| format!("디렉토리에 이름이 없습니다: {}", local_dir.display()))?
+        .ok_or("경로에 파일명이 없습니다.")?
         .to_string_lossy()
         .into_owned();
 
-    let mut next_rel = relative_path.clone();
-    next_rel.push(folder_name);
+    let id = orch.enqueue(JobSpec {
+        kind: JobKind::BulkUpload {
+            storage_id,
+            parent_id,
+            source,
+            name,
+        },
+        conflict,
+    });
+    Ok(vec![id.0])
+}
 
-    // Walk the local directory one level, recursing into subdirs.
-    let read = std::fs::read_dir(local_dir)
-        .map_err(|e| format!("read_dir {}: {e}", local_dir.display()))?;
-    for entry in read {
-        let entry = entry.map_err(|e| format!("read_dir entry: {e}"))?;
-        let path = entry.path();
-        // file_type() does NOT follow symlinks, so a loop via
-        // symlink-to-parent is naturally broken here.
-        let ft = entry
-            .file_type()
-            .map_err(|e| format!("file_type {}: {e}", path.display()))?;
+fn metadata_modified_secs(metadata: &std::fs::Metadata) -> Option<u64> {
+    metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_secs())
+}
 
-        if ft.is_dir() {
-            upload_dir_recursive(
-                bridge,
-                storage_id,
-                base_parent_id,
-                &path,
-                next_rel.clone(),
-                conflict,
-                out_ids,
-            )?;
-        } else if ft.is_file() {
-            let name = path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default();
-            if name.is_empty() {
-                continue;
-            }
-            let id = bridge.orchestrator.enqueue(JobSpec {
-                kind: JobKind::Upload {
-                    storage_id,
-                    parent_id: base_parent_id,
-                    source: path,
-                    name,
-                    relative_path: next_rel.clone(),
-                },
-                conflict,
-            });
-            out_ids.push(id.0);
-        }
-        // symlinks and special files are silently skipped.
+fn timestamps_match(left: Option<u64>, right: Option<u64>) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => left.abs_diff(right) <= 2,
+        _ => true,
     }
-    Ok(())
 }
 
 #[tauri::command]
@@ -884,21 +818,83 @@ pub fn run() {
             thread::Builder::new()
                 .name("crossmtp-event-pump".into())
                 .spawn(move || {
+                    // Per-job throttle for high-frequency progress events.
+                    // libmtp's progress callback can fire dozens of times per
+                    // file; on a 10k-file bulk upload that floods the webview
+                    // IPC and freezes the UI even though the worker thread is
+                    // still happily transferring. Cap progress emits to ~10/s
+                    // per job. State changes and other one-shot events are
+                    // never throttled.
+                    use std::collections::HashMap;
+                    use std::time::{Duration, Instant};
+                    const PROGRESS_MIN_INTERVAL: Duration = Duration::from_millis(100);
+                    let mut last_progress: HashMap<u64, Instant> = HashMap::new();
+                    let mut last_bulk_progress: HashMap<u64, Instant> = HashMap::new();
+
                     for event in events.iter() {
                         let wire = match event {
                             OrchEvent::Enqueued { id, kind } => WireEvent::Enqueued {
                                 id: id.0,
                                 kind: kind.into(),
                             },
-                            OrchEvent::StateChanged { id, state } => WireEvent::StateChanged {
-                                id: id.0,
-                                state: state.into(),
-                            },
-                            OrchEvent::Progress { id, sent, total } => WireEvent::Progress {
-                                id: id.0,
-                                sent,
-                                total,
-                            },
+                            OrchEvent::StateChanged { id, state } => {
+                                // Terminal state — drop throttle bookkeeping
+                                // so a future job with the same id (won't
+                                // happen with monotonic ids, but cheap) or
+                                // restart starts fresh.
+                                last_progress.remove(&id.0);
+                                last_bulk_progress.remove(&id.0);
+                                WireEvent::StateChanged {
+                                    id: id.0,
+                                    state: state.into(),
+                                }
+                            }
+                            OrchEvent::Progress { id, sent, total } => {
+                                let now = Instant::now();
+                                let allow = match last_progress.get(&id.0) {
+                                    Some(prev) if now.duration_since(*prev) < PROGRESS_MIN_INTERVAL
+                                        && sent < total =>
+                                    {
+                                        false
+                                    }
+                                    _ => true,
+                                };
+                                if !allow {
+                                    continue;
+                                }
+                                last_progress.insert(id.0, now);
+                                WireEvent::Progress {
+                                    id: id.0,
+                                    sent,
+                                    total,
+                                }
+                            }
+                            OrchEvent::BulkProgress {
+                                id,
+                                current_file,
+                                files_done,
+                                total_files,
+                            } => {
+                                let now = Instant::now();
+                                let is_final = files_done >= total_files;
+                                let allow = is_final
+                                    || match last_bulk_progress.get(&id.0) {
+                                        Some(prev) => {
+                                            now.duration_since(*prev) >= PROGRESS_MIN_INTERVAL
+                                        }
+                                        None => true,
+                                    };
+                                if !allow {
+                                    continue;
+                                }
+                                last_bulk_progress.insert(id.0, now);
+                                WireEvent::BulkProgress {
+                                    id: id.0,
+                                    current_file,
+                                    files_done,
+                                    total_files,
+                                }
+                            }
                             OrchEvent::QueuePaused { reason } => WireEvent::QueuePaused { reason },
                             OrchEvent::WorkerStopped => WireEvent::WorkerStopped,
                         };
