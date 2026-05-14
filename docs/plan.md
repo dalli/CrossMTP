@@ -399,17 +399,24 @@ ADB 모드는 MTP보다 강한 기기 접근 권한을 요구한다.
 
 ### Phase 3. Orchestrator 통합
 
+> **진행 상태 (2026-05-14)**: orchestrator에 `JobKind::AdbTarUpload` + `AdbContext` 통합 완료. smoke check + 통합 conflict planner (`adb-session::plan_upload`) + CLI `verify-q` end-to-end 경로 포함. 자동 테스트 워크스페이스 전체 통과. 취소 실기기 재현(4022 fixture)과 두 번째 기기 검증은 Phase 5 입력으로 이월. 세부는 [retrospectives/adb-phase-3.md](retrospectives/adb-phase-3.md) 참고.
+
 목표:
 
 * 기존 transfer queue에 `adbTarUpload` job type을 추가한다.
 * 기존 상태 모델과 cancellation model을 재사용한다.
 * 실패와 취소 terminal state를 명확히 만든다.
+* smoke check를 ADB 세션 bring-up 시점에 캐시 가능한 helper로 분리한다.
+* manifest probe 결과 + `is_same_file` + `RenameRule` 을 자동으로 `ConflictPlan`으로 정리하는 planner를 도입한다.
 
 통과 기준:
 
 * queued/cancelling/cancelled/failed/completed 상태 테스트 추가
 * ADB child process kill path 테스트
 * MTP job과 ADB job이 UI에서 같은 queue semantics를 가짐
+* `tar_upload::smoke_check_extract` 가 빈 입력에서 device-side `tar -x` 의 정상 종료를 검증한다
+* `conflict_planner::plan_upload` 가 plan.md §5 default policy (skip same / rename diff / 2s tolerance / `{name} ({n}){ext}`) 를 충실히 구현한다
+* `Orchestrator::cancel` 이 ADB cancel handle 까지 발화시켜 §6.1 5단계 정리 시퀀스를 트리거한다
 
 ### Phase 4. UI opt-in 추가
 

@@ -19,6 +19,7 @@
 //! UI opt-in (Phase 4), real-device throughput measurement (Phase 5).
 
 pub mod capability;
+pub mod conflict_planner;
 pub mod device_caps;
 pub mod devices;
 pub mod discovery;
@@ -39,4 +40,7 @@ pub use manifest::{
 };
 pub use process::{AdbOutput, AdbProcess, AdbRunner, CommandRunner};
 pub use session::AdbSession;
-pub use tar_upload::{is_safe_dest_path, upload_tar, CancelHandle, UploadOutcome};
+pub use tar_upload::{
+    is_safe_dest_path, smoke_check_extract, upload_tar, CancelHandle, UploadOutcome,
+};
+pub use conflict_planner::{plan_upload, LocalFile, PlanReport, PlanRequest, UploadPolicy};

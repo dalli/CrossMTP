@@ -111,6 +111,11 @@ enum WireKind {
         source: String,
         name: String,
     },
+    AdbTarUpload {
+        serial: String,
+        source: String,
+        dest_path: String,
+    },
 }
 
 impl From<JobKind> for WireKind {
@@ -152,6 +157,16 @@ impl From<JobKind> for WireKind {
                 parent_id,
                 source: source.to_string_lossy().into_owned(),
                 name,
+            },
+            JobKind::AdbTarUpload {
+                serial,
+                source,
+                dest_path,
+                plan: _,
+            } => WireKind::AdbTarUpload {
+                serial,
+                source: source.to_string_lossy().into_owned(),
+                dest_path,
             },
         }
     }

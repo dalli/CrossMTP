@@ -203,6 +203,36 @@ pub fn best_effort_pkill(session: &AdbSession, serial: &str, dest_path: &str) ->
     Ok(())
 }
 
+/// Active smoke-check: spawn `adb shell tar -x -C /data/local/tmp`,
+/// write a single end-of-archive marker (two 512-byte zero blocks) to
+/// its stdin, close stdin, and assert exit code 0. This proves the
+/// device-side tar accepts our wire format end-to-end without writing
+/// any real files.
+///
+/// `/data/local/tmp` is intentionally chosen as the extraction root:
+/// the marker contains no entries so nothing is actually created,
+/// but the path must exist and be writable by `adb shell`. Phase 0
+/// confirmed it's available on the toybox baseline.
+///
+/// Used by `device_caps::probe_device_with_smoke` and by the
+/// orchestrator at ADB session bring-up. The result is cached by
+/// `DeviceCapabilities::tar_extract_smoke_ok`.
+pub fn smoke_check_extract(session: &AdbSession, serial: &str) -> Result<bool> {
+    let mut child: AdbProcess = session.spawn(
+        serial,
+        &["shell", "tar", "-x", "-C", "/data/local/tmp"],
+        "tar-x-smoke",
+    )?;
+    if let Some(mut stdin) = child.take_stdin() {
+        // Two 512-byte zero blocks = POSIX end-of-archive marker.
+        let zero = [0u8; 1024];
+        let _ = stdin.write_all(&zero);
+        // Drop stdin → EOF.
+    }
+    let waited = child.wait_capture()?;
+    Ok(waited.exit_code == 0)
+}
+
 /// Refuse paths that traverse outside the shared-storage root or contain
 /// shell metacharacters we don't want to forward to the device.
 pub fn is_safe_dest_path(p: &str) -> bool {
