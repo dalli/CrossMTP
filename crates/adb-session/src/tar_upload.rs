@@ -11,7 +11,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tar_stream::{ConflictPlan, ProgressSnapshot, TarStreamBuilder};
 
@@ -83,9 +83,23 @@ impl Default for CancelHandle {
     }
 }
 
+/// Byte-level progress callback fired roughly every 100ms while the tar
+/// stream is writing. Receives a running snapshot of bytes emitted on
+/// the wire. Phase 4 introduction (plan.md §8 Phase 4 + Phase 3 retro
+/// §6-3): the orchestrator wraps this to emit `Event::Progress` so the
+/// UI can show live byte counters during ADB uploads instead of jumping
+/// from 0 → total at the end.
+///
+/// Owned `Box` (not `&mut dyn`) so the upload helper doesn't have to
+/// thread an extra lifetime through every call site.
+pub type ProgressCallback = Box<dyn FnMut(u64) + Send>;
+
 /// Stream `source_root` (local file or directory) into `dest_path` on
 /// `serial` using `adb shell tar -x -C <dest_path>`. Blocks the calling
 /// thread until the device-side tar exits or `cancel` fires.
+///
+/// Thin wrapper around [`upload_tar_with_progress`] for callers that
+/// don't need byte-level progress events.
 pub fn upload_tar(
     session: &AdbSession,
     serial: &str,
@@ -93,6 +107,22 @@ pub fn upload_tar(
     dest_path: &str,
     plan: ConflictPlan,
     cancel: CancelHandle,
+) -> Result<UploadOutcome> {
+    upload_tar_with_progress(session, serial, source_root, dest_path, plan, cancel, None)
+}
+
+/// Same as [`upload_tar`] but invokes `on_progress(bytes_written_so_far)`
+/// at most once per 100ms while streaming. The callback runs on the same
+/// thread as the writer, so it must not block — the orchestrator wraps
+/// it as a non-blocking channel send.
+pub fn upload_tar_with_progress(
+    session: &AdbSession,
+    serial: &str,
+    source_root: &Path,
+    dest_path: &str,
+    plan: ConflictPlan,
+    cancel: CancelHandle,
+    on_progress: Option<ProgressCallback>,
 ) -> Result<UploadOutcome> {
     if !is_safe_dest_path(dest_path) {
         return Err(AdbError::CommandFailed {
@@ -123,6 +153,7 @@ pub fn upload_tar(
         TarStreamBuilder::new(PathBuf::from(source_root)).with_conflict_plan(plan),
         &mut stdin,
         &cancel,
+        on_progress,
     );
     // Drop stdin to signal EOF to device-side tar.
     drop(stdin);
@@ -166,14 +197,30 @@ fn build_and_stream<W: Write>(
     builder: TarStreamBuilder,
     sink: &mut W,
     cancel: &CancelHandle,
+    on_progress: Option<ProgressCallback>,
 ) -> std::result::Result<ProgressSnapshot, tar_stream::TarError> {
-    let counter = builder.write_to(&mut CancelAwareSink { inner: sink, cancel })?;
+    let mut wrapped = CancelAwareSink {
+        inner: sink,
+        cancel,
+        bytes_written: 0,
+        on_progress,
+        last_emit: Instant::now(),
+    };
+    let counter = builder.write_to(&mut wrapped)?;
+    // Final emit so the UI sees the totals even when streaming finishes
+    // inside the 100ms throttle window.
+    if let Some(cb) = wrapped.on_progress.as_mut() {
+        (cb)(wrapped.bytes_written);
+    }
     Ok(counter.snapshot())
 }
 
 struct CancelAwareSink<'a, W: Write> {
     inner: &'a mut W,
     cancel: &'a CancelHandle,
+    bytes_written: u64,
+    on_progress: Option<ProgressCallback>,
+    last_emit: Instant,
 }
 
 impl<'a, W: Write> Write for CancelAwareSink<'a, W> {
@@ -184,7 +231,19 @@ impl<'a, W: Write> Write for CancelAwareSink<'a, W> {
                 "upload cancelled",
             ));
         }
-        self.inner.write(buf)
+        let n = self.inner.write(buf)?;
+        self.bytes_written += n as u64;
+        if let Some(cb) = self.on_progress.as_mut() {
+            // Throttle to ~10 emits/sec. The IPC pipeline in the Tauri
+            // layer already throttles further but the ADB write loop can
+            // call us hundreds of times per second on a fast device, so
+            // we cap here too.
+            if self.last_emit.elapsed() >= Duration::from_millis(100) {
+                (cb)(self.bytes_written);
+                self.last_emit = Instant::now();
+            }
+        }
+        Ok(n)
     }
     fn flush(&mut self) -> std::io::Result<()> {
         self.inner.flush()
@@ -302,9 +361,28 @@ mod tests {
         let mut s = CancelAwareSink {
             inner: &mut buf,
             cancel: &h,
+            bytes_written: 0,
+            on_progress: None,
+            last_emit: Instant::now(),
         };
         h.cancel();
         let err = s.write(b"hi").unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::Interrupted);
+    }
+
+    #[test]
+    fn cancel_aware_sink_tracks_bytes_written() {
+        let h = CancelHandle::new();
+        let mut buf = Vec::new();
+        let mut s = CancelAwareSink {
+            inner: &mut buf,
+            cancel: &h,
+            bytes_written: 0,
+            on_progress: None,
+            last_emit: Instant::now(),
+        };
+        s.write_all(b"hello").unwrap();
+        s.write_all(b" world").unwrap();
+        assert_eq!(s.bytes_written, 11);
     }
 }

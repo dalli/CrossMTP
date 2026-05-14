@@ -25,7 +25,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-use adb_session::{AdbSession, CancelHandle as AdbCancelHandle};
+use adb_session::{AdbSession, CancelHandle as AdbCancelHandle, DeviceCapabilities};
 use mtp_session::{Device, Entry, EntryKind, MtpError, Storage};
 use tar_stream::ConflictPlan;
 
@@ -173,6 +173,41 @@ pub enum Event {
 pub struct AdbContext {
     pub session: Arc<AdbSession>,
     pub serial: String,
+    /// Cached per-device capabilities probed at bring-up time. Phase 4
+    /// retro §6-5: the orchestrator owns this so the UI doesn't have to
+    /// re-probe before every upload. `None` means the orchestrator was
+    /// constructed without a probe (test path) and the worker treats the
+    /// fast-path as unavailable.
+    pub capabilities: Option<DeviceCapabilities>,
+}
+
+impl AdbContext {
+    /// Convenience constructor: probe the device once at bring-up,
+    /// stamp the smoke-check result into `DeviceCapabilities`, and stash
+    /// the cache on the context. Used by the Tauri shell when the user
+    /// opts into ADB mode (plan.md §8 Phase 4 capability gate).
+    pub fn probe(session: Arc<AdbSession>, serial: String) -> Result<Self, adb_session::AdbError> {
+        let mut caps = adb_session::probe_device(&session, &serial)?;
+        // Smoke check is a spawn+stdin call, not advertised by
+        // `probe_device` itself — fill it in here so callers see one
+        // authoritative `DeviceCapabilities`.
+        caps.tar_extract_smoke_ok =
+            adb_session::smoke_check_extract(&session, &serial).unwrap_or(false);
+        Ok(Self {
+            session,
+            serial,
+            capabilities: Some(caps),
+        })
+    }
+
+    /// True when the per-device probe + smoke check both said the ADB
+    /// fast path is real for this device.
+    pub fn can_tar_upload(&self) -> bool {
+        self.capabilities
+            .as_ref()
+            .map(|c| c.can_tar_upload())
+            .unwrap_or(false)
+    }
 }
 
 /// Public handle to the worker thread. Drop = graceful shutdown after
@@ -1161,8 +1196,29 @@ impl Worker {
         self.transition(id, JobState::Transferring);
 
         let session = Arc::clone(&adb.session);
-        let outcome =
-            adb_session::upload_tar(&session, &serial, &source, &dest_path, plan, adb_cancel.clone());
+        // Phase 4 byte-level progress: feed each ~100ms-throttled byte
+        // count from the tar sink straight onto the orchestrator's event
+        // channel as a `Progress { sent = total = bytes_written }` pair.
+        // Total stays equal to sent because we don't know the final
+        // archive size in advance — the UI treats sent/total ratio as
+        // "in motion" when both move together.
+        let evt_tx = self.evt_tx.clone();
+        let on_progress: adb_session::ProgressCallback = Box::new(move |bytes| {
+            let _ = evt_tx.send(Event::Progress {
+                id,
+                sent: bytes,
+                total: bytes,
+            });
+        });
+        let outcome = adb_session::upload_tar_with_progress(
+            &session,
+            &serial,
+            &source,
+            &dest_path,
+            plan,
+            adb_cancel.clone(),
+            Some(on_progress),
+        );
 
         let bytes = match &outcome {
             Ok(o) => o.progress.bytes_emitted,

@@ -21,6 +21,7 @@ import {
   TransferEvent,
   LocalEntry,
 } from "./types";
+import { AdbPanel } from "./components/AdbPanel";
 import { Banner } from "./components/Banner";
 import { Browser } from "./components/Browser";
 import { LocalBrowser } from "./components/LocalBrowser";
@@ -442,6 +443,7 @@ export function App() {
         onConflictChange={setConflictPolicy}
         envHints={envHints}
       />
+      <AdbPanel />
       <div
         className="main"
         ref={mainRef}

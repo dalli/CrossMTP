@@ -420,6 +420,8 @@ ADB 모드는 MTP보다 강한 기기 접근 권한을 요구한다.
 
 ### Phase 4. UI opt-in 추가
 
+> **진행 상태 (2026-05-14)**: AdbPanel 컴포넌트 + 백엔드 ADB IPC commands (`adb_status` / `adb_plan_upload` / `enqueue_adb_tar_upload` / `adb_cancel_job`) + plan token registry + per-serial orchestrator + 바이트 단위 progress wrapper + `AdbContext::probe`로 smoke check auto-cache + QueuePanel "Skipped N — 보기" 패널 추가. cargo test --workspace 112 passed, tsc 0 errors, vite production build 통과. 실기기 라이브 검증은 Phase 5 입력으로 이월. 세부는 [retrospectives/adb-phase-4.md](retrospectives/adb-phase-4.md) 참고.
+
 목표:
 
 * 기기 capability에 따라 “고속 ADB 업로드” 옵션을 노출한다.
@@ -437,6 +439,9 @@ ADB 모드는 MTP보다 강한 기기 접근 권한을 요구한다.
 * 완료 화면에서 `Skipped N개 — 보기`가 표시됨
 * 전송 중 진행률과 취소 동작 표시
 * 기존 MTP 전송 UI가 퇴행하지 않음
+* `AdbContext::probe` 가 `probe_device` + `smoke_check_extract` 를 한 번에 실행해 `DeviceCapabilities::tar_extract_smoke_ok` 를 자동으로 채운다
+* `upload_tar_with_progress` 가 100ms throttle 로 byte-level progress 콜백을 발화한다 (orchestrator → `Event::Progress` → `transfer-event`)
+* `ConflictPlan` 은 IPC 경계에서 wire 로 옮기지 않는다. `adb_plan_upload` 가 서버 측 plan registry 에 보관하고 opaque `planToken` 만 frontend 로 전달한다
 
 ### Phase 5. 실기기 성능/실패 검증
 

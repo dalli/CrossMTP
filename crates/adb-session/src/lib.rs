@@ -41,6 +41,7 @@ pub use manifest::{
 pub use process::{AdbOutput, AdbProcess, AdbRunner, CommandRunner};
 pub use session::AdbSession;
 pub use tar_upload::{
-    is_safe_dest_path, smoke_check_extract, upload_tar, CancelHandle, UploadOutcome,
+    is_safe_dest_path, smoke_check_extract, upload_tar, upload_tar_with_progress, CancelHandle,
+    ProgressCallback, UploadOutcome,
 };
 pub use conflict_planner::{plan_upload, LocalFile, PlanReport, PlanRequest, UploadPolicy};

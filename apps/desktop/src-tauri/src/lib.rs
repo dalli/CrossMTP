@@ -11,14 +11,20 @@
 //!   touch the orchestrator handle (which is `Send + Sync`-safe through
 //!   internal channels) and the lazily-built device snapshot cache.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
+use adb_session::{
+    plan_upload, probe_manifest, AdbSession, DeviceState, LocalFile, PlanRequest, UploadPolicy,
+};
 use orchestrator::{
-    ConflictPolicy, Event as OrchEvent, JobId, JobKind, JobSpec, JobState, Orchestrator,
+    AdbContext, ConflictPolicy, Event as OrchEvent, JobId, JobKind, JobSpec, JobState,
+    Orchestrator,
 };
 use serde::{Deserialize, Serialize};
+use tar_stream::ConflictPlan;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 // ---------- wire types (camelCase to match the React side) ----------
@@ -267,6 +273,32 @@ struct AppState {
     orchestrator: Arc<Orchestrator>,
     inner: Mutex<Option<DeviceBridge>>,
     last_snapshot: Mutex<Option<DeviceSnapshot>>,
+    /// Phase 4: shared ADB session built lazily by `adb_status`. The
+    /// orchestrator does NOT own an `AdbContext` directly yet — the
+    /// current orchestrator is single-device-typed (MTP). The Tauri
+    /// shell holds the ADB session and feeds tar-upload jobs through a
+    /// dedicated ADB orchestrator spawned per opt-in serial.
+    adb_session: Mutex<Option<Arc<AdbSession>>>,
+    /// Per-serial orchestrator handle for ADB uploads. Keyed by serial
+    /// so multi-device coordination stays out of scope (plan.md §2.2).
+    adb_orchestrators: Mutex<HashMap<String, Arc<Orchestrator>>>,
+    /// Plan registry: `adb_plan_upload` returns an opaque token; the
+    /// matching `ConflictPlan` stays here so the wire never carries the
+    /// full HashMap. Phase 3 retro §4-5.
+    adb_plans: Mutex<HashMap<u64, AdbPlanEntry>>,
+    next_plan_id: std::sync::atomic::AtomicU64,
+    /// Captured at setup so per-serial ADB orchestrator pumps can emit
+    /// `transfer-event` without having to thread an `AppHandle` through
+    /// every call site.
+    app_handle: Mutex<Option<AppHandle>>,
+}
+
+#[derive(Debug, Clone)]
+struct AdbPlanEntry {
+    serial: String,
+    source: PathBuf,
+    dest_path: String,
+    plan: ConflictPlan,
 }
 
 #[allow(dead_code)] // info/storages are kept for future reuse; UI currently re-fetches.
@@ -795,6 +827,357 @@ fn get_local_roots() -> Result<Vec<LocalEntry>, String> {
     Ok(roots)
 }
 
+// ---------- ADB (Phase 4) ----------
+//
+// The ADB fast path is opt-in: the UI calls `adb_status` to discover the
+// adb binary + connected devices, then `adb_plan_upload` to compute a
+// conflict report for a given source/dest, and finally
+// `enqueue_adb_tar_upload` with the plan token. Each step is honest
+// about whether it's a real fast path or a "probe failed → fall back to
+// MTP" outcome (plan.md §2.1).
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AdbDeviceWire {
+    serial: String,
+    state: String,
+    model: Option<String>,
+    can_tar_upload: bool,
+    tar_extract_smoke_ok: bool,
+    has_tar: bool,
+    has_find: bool,
+    has_stat: bool,
+    tar_impl: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AdbStatusWire {
+    adb_available: bool,
+    adb_path: Option<String>,
+    adb_source: Option<String>,
+    error: Option<String>,
+    devices: Vec<AdbDeviceWire>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AdbPlanReportWire {
+    plan_token: u64,
+    clean: Vec<String>,
+    skipped_same: Vec<String>,
+    renamed: Vec<RenamedPairWire>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RenamedPairWire {
+    original: String,
+    new_name: String,
+}
+
+/// Discover the `adb` binary, list devices, and probe per-device
+/// capabilities. Cheap enough to call every time the user opens the ADB
+/// panel; UI is responsible for not polling in a loop.
+#[tauri::command]
+fn adb_status(state: State<'_, AppState>) -> AdbStatusWire {
+    // `AdbSession::open()` runs discovery internally; cache the resulting
+    // session so subsequent plan + upload calls reuse it. Reusing avoids
+    // re-discovering on every plan call.
+    let session = {
+        let mut guard = state.adb_session.lock().unwrap();
+        if let Some(s) = guard.as_ref() {
+            Arc::clone(s)
+        } else {
+            match AdbSession::open() {
+                Ok(s) => {
+                    let s = Arc::new(s);
+                    *guard = Some(Arc::clone(&s));
+                    s
+                }
+                Err(e) => {
+                    return AdbStatusWire {
+                        adb_available: false,
+                        adb_path: None,
+                        adb_source: None,
+                        error: Some(format!("{e}")),
+                        devices: vec![],
+                    };
+                }
+            }
+        }
+    };
+    let loc = session.location().clone();
+
+    let listed = match session.list_devices() {
+        Ok(d) => d,
+        Err(e) => {
+            return AdbStatusWire {
+                adb_available: true,
+                adb_path: Some(loc.path.to_string_lossy().into_owned()),
+                adb_source: Some(format!("{:?}", loc.source)),
+                error: Some(format!("{e}")),
+                devices: vec![],
+            };
+        }
+    };
+
+    let mut devices = Vec::new();
+    for d in listed {
+        if !matches!(d.state, DeviceState::Device) {
+            devices.push(AdbDeviceWire {
+                serial: d.serial.clone(),
+                state: format!("{:?}", d.state).to_ascii_lowercase(),
+                model: d.model.clone(),
+                can_tar_upload: false,
+                tar_extract_smoke_ok: false,
+                has_tar: false,
+                has_find: false,
+                has_stat: false,
+                tar_impl: None,
+            });
+            continue;
+        }
+        // Authorised device — probe per-device capabilities + smoke check.
+        let mut caps = adb_session::probe_device(&session, &d.serial).unwrap_or_else(|_| {
+            adb_session::DeviceCapabilities {
+                has_tar: false,
+                has_find: false,
+                has_stat: false,
+                tar_impl: None,
+                tar_extract_smoke_ok: false,
+            }
+        });
+        caps.tar_extract_smoke_ok =
+            adb_session::smoke_check_extract(&session, &d.serial).unwrap_or(false);
+        devices.push(AdbDeviceWire {
+            serial: d.serial.clone(),
+            state: "device".into(),
+            model: d.model.clone(),
+            can_tar_upload: caps.can_tar_upload(),
+            tar_extract_smoke_ok: caps.tar_extract_smoke_ok,
+            has_tar: caps.has_tar,
+            has_find: caps.has_find,
+            has_stat: caps.has_stat,
+            tar_impl: caps.tar_impl.clone(),
+        });
+    }
+
+    AdbStatusWire {
+        adb_available: true,
+        adb_path: Some(loc.path.to_string_lossy().into_owned()),
+        adb_source: Some(format!("{:?}", loc.source)),
+        error: None,
+        devices,
+    }
+}
+
+/// Run a manifest probe + `plan_upload` for the local `source` against
+/// the device-side `dest_path`. Returns a `PlanReport` plus an opaque
+/// `plan_token` the UI hands back to `enqueue_adb_tar_upload`. The full
+/// `ConflictPlan` (HashMap-backed) stays server-side; only counts and
+/// per-entry summaries cross the IPC boundary. Phase 3 retro §4-5.
+#[tauri::command]
+fn adb_plan_upload(
+    serial: String,
+    source: String,
+    dest_path: String,
+    state: State<'_, AppState>,
+) -> Result<AdbPlanReportWire, String> {
+    let session = state
+        .adb_session
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(Arc::clone)
+        .ok_or_else(|| "ADB 세션이 아직 초기화되지 않았습니다. 먼저 ADB 상태를 새로고침해주세요.".to_string())?;
+
+    let source_path = PathBuf::from(&source);
+    if !source_path.exists() {
+        return Err(format!("로컬 경로를 찾을 수 없습니다: {source}"));
+    }
+
+    // Collect local files (relative paths + size + mtime). We reuse
+    // tar-stream's walk for the path normalisation and mtime semantics.
+    let local_root = source_path.clone();
+    let walked = tar_stream::walk(&local_root).map_err(|e| format!("로컬 스캔 실패: {e}"))?;
+    let mut locals = Vec::new();
+    for e in walked {
+        if matches!(e.kind, tar_stream::EntryKind::File) {
+            locals.push(LocalFile {
+                rel_path: e.relative.join("/"),
+                size: e.size,
+                mtime_secs: e.mtime_secs,
+            });
+        }
+    }
+
+    let remote = probe_manifest(&session, &serial, &dest_path)
+        .map_err(|e| format!("기기 매니페스트 조회 실패: {e}"))?;
+
+    let policy = UploadPolicy::plan_defaults();
+    let (plan, report) = plan_upload(&PlanRequest {
+        locals: &locals,
+        remote: &remote,
+        policy: &policy,
+    })
+    .map_err(|e| format!("planner: {e}"))?;
+
+    let token = state
+        .next_plan_id
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    state.adb_plans.lock().unwrap().insert(
+        token,
+        AdbPlanEntry {
+            serial: serial.clone(),
+            source: source_path.clone(),
+            dest_path: dest_path.clone(),
+            plan,
+        },
+    );
+
+    Ok(AdbPlanReportWire {
+        plan_token: token,
+        clean: report.clean,
+        skipped_same: report.skipped_same,
+        renamed: report
+            .renamed
+            .into_iter()
+            .map(|(original, new_name)| RenamedPairWire { original, new_name })
+            .collect(),
+    })
+}
+
+/// Enqueue an ADB tar-upload job. `plan_token` must come from a prior
+/// `adb_plan_upload` call in this process — tokens are not durable
+/// across restarts. Returns the orchestrator job id.
+#[tauri::command]
+fn enqueue_adb_tar_upload(
+    plan_token: u64,
+    state: State<'_, AppState>,
+) -> Result<u64, String> {
+    let entry = state
+        .adb_plans
+        .lock()
+        .unwrap()
+        .remove(&plan_token)
+        .ok_or_else(|| "유효하지 않은 plan_token (만료되었거나 이미 사용됨)".to_string())?;
+
+    let session = state
+        .adb_session
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(Arc::clone)
+        .ok_or_else(|| "ADB 세션이 초기화되지 않았습니다.".to_string())?;
+
+    // One orchestrator per serial. The orchestrator owns the AdbContext
+    // exclusively, so we look up an existing handle or spin a new one
+    // bound to this device. MTP-only orchestrator stays the
+    // app-default; ADB jobs only ever run on the per-serial
+    // orchestrator.
+    let mut map = state.adb_orchestrators.lock().unwrap();
+    let orch = if let Some(o) = map.get(&entry.serial) {
+        Arc::clone(o)
+    } else {
+        let adb_ctx = AdbContext::probe(session.clone(), entry.serial.clone())
+            .map_err(|e| format!("ADB 디바이스 프로브 실패: {e}"))?;
+        let (orch, events) = Orchestrator::start_with_adb(None, Some(adb_ctx));
+        let orch = Arc::new(orch);
+        let app_clone_orch = orch.clone();
+        // Pump events through the same Tauri channel — but we need
+        // access to AppHandle. Defer pump setup to the worker thread we
+        // already manage in `run()`. To keep this PR contained, we
+        // launch a per-serial pump now using the orchestrator we just
+        // started. The pump runs until the orchestrator drops.
+        spawn_adb_event_pump(events, &app_handle_for_state(&state));
+        map.insert(entry.serial.clone(), Arc::clone(&orch));
+        let _ = app_clone_orch; // keep alive
+        orch
+    };
+
+    let id = orch.enqueue(JobSpec {
+        kind: JobKind::AdbTarUpload {
+            serial: entry.serial,
+            source: entry.source,
+            dest_path: entry.dest_path,
+            plan: entry.plan,
+        },
+        conflict: ConflictPolicy::Skip,
+    });
+    Ok(id.0)
+}
+
+/// Cancel an ADB job by id and serial — we don't track which serial owns
+/// which id on the JS side, so the JS layer passes the serial that
+/// minted the plan.
+#[tauri::command]
+fn adb_cancel_job(
+    serial: String,
+    job_id: u64,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let map = state.adb_orchestrators.lock().unwrap();
+    let orch = map
+        .get(&serial)
+        .ok_or_else(|| format!("ADB orchestrator for {serial} not running"))?;
+    orch.cancel(JobId(job_id));
+    Ok(())
+}
+
+/// AppHandle reach-around for the lazy per-serial orchestrator pump.
+/// Stored on `AppState` at setup time.
+fn app_handle_for_state(state: &State<'_, AppState>) -> AppHandle {
+    state
+        .app_handle
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("app handle set at setup")
+}
+
+fn spawn_adb_event_pump(events: std::sync::mpsc::Receiver<OrchEvent>, app: &AppHandle) {
+    let app = app.clone();
+    thread::Builder::new()
+        .name("crossmtp-adb-event-pump".into())
+        .spawn(move || {
+            for event in events.iter() {
+                let wire = match event {
+                    OrchEvent::Enqueued { id, kind } => WireEvent::Enqueued {
+                        id: id.0,
+                        kind: kind.into(),
+                    },
+                    OrchEvent::StateChanged { id, state } => WireEvent::StateChanged {
+                        id: id.0,
+                        state: state.into(),
+                    },
+                    OrchEvent::Progress { id, sent, total } => WireEvent::Progress {
+                        id: id.0,
+                        sent,
+                        total,
+                    },
+                    OrchEvent::BulkProgress {
+                        id,
+                        current_file,
+                        files_done,
+                        total_files,
+                    } => WireEvent::BulkProgress {
+                        id: id.0,
+                        current_file,
+                        files_done,
+                        total_files,
+                    },
+                    OrchEvent::QueuePaused { reason } => WireEvent::QueuePaused { reason },
+                    OrchEvent::WorkerStopped => WireEvent::WorkerStopped,
+                };
+                if let Err(e) = app.emit("transfer-event", &wire) {
+                    eprintln!("[crossmtp-adb] event emit failed: {e}");
+                }
+            }
+        })
+        .expect("failed to spawn adb event pump");
+}
+
 // ---------- entry point ----------
 
 static APP_STATE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
@@ -818,6 +1201,10 @@ pub fn run() {
             get_queue_state,
             list_local_entries,
             get_local_roots,
+            adb_status,
+            adb_plan_upload,
+            enqueue_adb_tar_upload,
+            adb_cancel_job,
         ])
         .setup(|app| {
             // Friendly default window title with version.
@@ -924,6 +1311,11 @@ pub fn run() {
                 orchestrator: orch_for_state,
                 inner: Mutex::new(None),
                 last_snapshot: Mutex::new(None),
+                adb_session: Mutex::new(None),
+                adb_orchestrators: Mutex::new(HashMap::new()),
+                adb_plans: Mutex::new(HashMap::new()),
+                next_plan_id: std::sync::atomic::AtomicU64::new(1),
+                app_handle: Mutex::new(Some(app.handle().clone())),
             });
 
             Ok(())

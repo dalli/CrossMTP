@@ -857,6 +857,7 @@ fn cmd_adb(rest: &[String]) -> ExitCode {
         let adb_ctx = orchestrator::AdbContext {
             session: session.clone(),
             serial: serial.to_string(),
+            capabilities: None,
         };
         let (orch, events) = orchestrator::Orchestrator::start_with_adb(None, Some(adb_ctx));
 
