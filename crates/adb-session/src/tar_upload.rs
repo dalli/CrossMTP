@@ -132,8 +132,15 @@ pub fn upload_tar_with_progress(
     }
     cancel.set_dest(dest_path);
 
+    // `adb shell` rejoins argv with spaces and feeds it to the device's
+    // /system/bin/sh -c "...", so any shell metachar in the dest path
+    // (parentheses, spaces, &, ;, $) gets re-interpreted unless we
+    // single-quote the whole thing. plan.md §4.2.
+    let dest_quoted = sh_single_quote(dest_path);
+
     // `mkdir -p` the destination first. Cheap, idempotent.
-    let mkdir = session.shell(serial, &["mkdir", "-p", dest_path])?;
+    let mkdir_arg = format!("mkdir -p {}", dest_quoted);
+    let mkdir = session.shell(serial, &[mkdir_arg.as_str()])?;
     if mkdir.exit_code != 0 {
         return Err(AdbError::CommandFailed {
             code: mkdir.exit_code,
@@ -141,8 +148,9 @@ pub fn upload_tar_with_progress(
         });
     }
 
+    let tar_arg = format!("tar -x -C {}", dest_quoted);
     let mut child: AdbProcess =
-        session.spawn(serial, &["shell", "tar", "-x", "-C", dest_path], "tar-x")?;
+        session.spawn(serial, &["shell", tar_arg.as_str()], "tar-x")?;
 
     let mut stdin = child.take_stdin().ok_or_else(|| AdbError::CommandFailed {
         code: -1,
@@ -251,15 +259,34 @@ impl<'a, W: Write> Write for CancelAwareSink<'a, W> {
 }
 
 /// `pkill -f` the device-side tar. We match the exact arg form we used
-/// at spawn so we don't kill other tars the user is running.
+/// at spawn so we don't kill other tars the user is running. Note: the
+/// pattern we kill on is the *unquoted* form because that's what the
+/// device's process table actually contains (sh -c expands the quotes
+/// before exec).
 pub fn best_effort_pkill(session: &AdbSession, serial: &str, dest_path: &str) -> Result<()> {
     // toybox pkill is available on the Phase 0 baseline. If it isn't,
     // the call returns CommandFailed which we swallow.
-    let _ = session.shell(
-        serial,
-        &["pkill", "-f", &format!("tar -x -C {dest_path}")],
-    )?;
+    let pattern = format!("tar -x -C {dest_path}");
+    let cmd = format!("pkill -f {}", sh_single_quote(&pattern));
+    let _ = session.shell(serial, &[cmd.as_str()])?;
     Ok(())
+}
+
+/// POSIX-safe single-quote wrap for an arbitrary string. Embedded `'`
+/// becomes `'\''` (close, escape, reopen). Result can be passed
+/// verbatim to `sh -c`.
+fn sh_single_quote(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('\'');
+    for ch in s.chars() {
+        if ch == '\'' {
+            out.push_str("'\\''");
+        } else {
+            out.push(ch);
+        }
+    }
+    out.push('\'');
+    out
 }
 
 /// Active smoke-check: spawn `adb shell tar -x -C /data/local/tmp`,
@@ -277,19 +304,59 @@ pub fn best_effort_pkill(session: &AdbSession, serial: &str, dest_path: &str) ->
 /// orchestrator at ADB session bring-up. The result is cached by
 /// `DeviceCapabilities::tar_extract_smoke_ok`.
 pub fn smoke_check_extract(session: &AdbSession, serial: &str) -> Result<bool> {
+    // Build a minimal valid tar archive in-memory: one empty regular
+    // file (`.smoke`) followed by two zero blocks (POSIX end-of-archive).
+    // toybox tar rejects an "all-zeros" stream as "Not tar", so we must
+    // include at least one real header for the smoke check to be
+    // honest about whether `tar -x -C` actually works on the device.
+    let archive = build_tiny_smoke_archive();
     let mut child: AdbProcess = session.spawn(
         serial,
         &["shell", "tar", "-x", "-C", "/data/local/tmp"],
         "tar-x-smoke",
     )?;
     if let Some(mut stdin) = child.take_stdin() {
-        // Two 512-byte zero blocks = POSIX end-of-archive marker.
-        let zero = [0u8; 1024];
-        let _ = stdin.write_all(&zero);
+        let _ = stdin.write_all(&archive);
         // Drop stdin → EOF.
     }
     let waited = child.wait_capture()?;
     Ok(waited.exit_code == 0)
+}
+
+/// Returns bytes for a USTAR archive containing a single empty file
+/// `.smoke`. 512-byte header + 1024 bytes of zero blocks = 1536 bytes.
+fn build_tiny_smoke_archive() -> Vec<u8> {
+    let mut header = [0u8; 512];
+    let name = b".smoke";
+    header[..name.len()].copy_from_slice(name);
+    // mode "0000644 \0"
+    header[100..108].copy_from_slice(b"0000644\0");
+    // uid/gid "0000000 \0"
+    header[108..116].copy_from_slice(b"0000000\0");
+    header[116..124].copy_from_slice(b"0000000\0");
+    // size = 0 → "00000000000\0"
+    header[124..136].copy_from_slice(b"00000000000\0");
+    // mtime = 0
+    header[136..148].copy_from_slice(b"00000000000\0");
+    // checksum field initialised to spaces while computing
+    for b in &mut header[148..156] {
+        *b = b' ';
+    }
+    // typeflag '0' = regular file
+    header[156] = b'0';
+    // ustar magic + version
+    header[257..263].copy_from_slice(b"ustar\0");
+    header[263..265].copy_from_slice(b"00");
+    // checksum: sum of all unsigned bytes, written as 6-digit octal +
+    // NUL + space.
+    let sum: u32 = header.iter().map(|b| *b as u32).sum();
+    let cs = format!("{:06o}\0 ", sum);
+    header[148..156].copy_from_slice(cs.as_bytes());
+
+    let mut out = Vec::with_capacity(1536);
+    out.extend_from_slice(&header);
+    out.extend_from_slice(&[0u8; 1024]); // EOF marker
+    out
 }
 
 /// Refuse paths that traverse outside the shared-storage root or contain

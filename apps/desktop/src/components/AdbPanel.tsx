@@ -1,51 +1,29 @@
-// ADB 고속 업로드 capability gate + opt-in flow (plan.md §8 Phase 4).
+// ADB 고속 업로드 capability strip — Phase A.0 단순화 버전.
 //
-// Single React component covering all three Phase 4 UI surfaces:
-//   1. Capability strip: shows whether the ADB fast path is usable on
-//      the currently selected device, with the *reason* when it isn't
-//      (plan.md §2.1 "fallback인지 추천 선택값인지 구분").
-//   2. Source/dest entry + "plan" button.
-//   3. Conflict manifest modal: surfaces `skippedSame` and `renamed`
-//      lists before tar streaming starts (plan.md §5 manifest-driven
-//      batch dialog, Phase 3 retro §6-2).
+// 폴더 / 경로 / 전송 흐름은 MTP UI의 drag-drop 자동 라우팅
+// (App.tsx `routeFoldersViaAdb`)이 모두 처리하므로, 이 패널의 역할은
+// 다음 세 가지만 남깁니다:
+//   1. 사용 on/off 토글 (capability strip 자체를 펼치기/접기)
+//   2. 연결된 ADB device 목록과 상태 표시
+//   3. 사용 불가 사유 안내 (USB debugging 미승인 / tar 없음 등)
 //
-// All wire types come from `types.ts`. The component does not talk to
-// the MTP queue — ADB jobs land on the same `transfer-event` channel,
-// so the rest of the UI (QueuePanel) doesn't need to know whether a
-// transferring job is MTP or ADB.
+// plan.md §2.1 "fallback인지 추천 선택값인지 구분"의 *정보 표시*만
+// 담당하고, 실제 업로드 트리거는 더 이상 여기서 하지 않습니다.
 
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
-import { AdbPlanReport, AdbStatusWire } from "../types";
+import { AdbStatusWire } from "../types";
 
-interface Props {
-  /** Initial dest folder on the device — defaults to a safe path. */
-  defaultDestPath?: string;
-}
-
-export function AdbPanel({ defaultDestPath = "/sdcard/Download/CrossMTP" }: Props) {
+export function AdbPanel() {
+  const [open, setOpen] = useState(false);
   const [status, setStatus] = useState<AdbStatusWire | null>(null);
   const [loading, setLoading] = useState(false);
-  const [optedIn, setOptedIn] = useState(false);
-  const [selectedSerial, setSelectedSerial] = useState<string | null>(null);
-  const [sourcePath, setSourcePath] = useState<string>("");
-  const [destPath, setDestPath] = useState<string>(defaultDestPath);
-  const [plan, setPlan] = useState<AdbPlanReport | null>(null);
-  const [planError, setPlanError] = useState<string | null>(null);
-  const [planning, setPlanning] = useState(false);
-  const [confirmOpen, setConfirmOpen] = useState(false);
-  const [lastEnqueued, setLastEnqueued] = useState<number | null>(null);
 
   const refresh = useCallback(async () => {
     setLoading(true);
     try {
       const s = await invoke<AdbStatusWire>("adb_status");
       setStatus(s);
-      // Auto-select the first usable device so the form has something
-      // to bind to. Users with multiple devices can pick from the dropdown.
-      const firstUsable = s.devices.find((d) => d.canTarUpload);
-      if (firstUsable && !selectedSerial) setSelectedSerial(firstUsable.serial);
     } catch (e) {
       setStatus({
         adbAvailable: false,
@@ -57,179 +35,76 @@ export function AdbPanel({ defaultDestPath = "/sdcard/Download/CrossMTP" }: Prop
     } finally {
       setLoading(false);
     }
-  }, [selectedSerial]);
+  }, []);
 
   useEffect(() => {
-    if (optedIn) refresh();
-  }, [optedIn, refresh]);
+    if (open && !status) refresh();
+  }, [open, status, refresh]);
 
-  const pickSource = useCallback(async () => {
-    try {
-      const picked = await openDialog({ multiple: false, directory: true });
-      if (typeof picked === "string") setSourcePath(picked);
-    } catch {
-      // user cancelled
-    }
-  }, []);
-
-  const runPlan = useCallback(async () => {
-    if (!selectedSerial || !sourcePath || !destPath) {
-      setPlanError("기기 / 로컬 폴더 / 기기 경로를 모두 지정해주세요.");
-      return;
-    }
-    setPlanning(true);
-    setPlanError(null);
-    setPlan(null);
-    try {
-      const report = await invoke<AdbPlanReport>("adb_plan_upload", {
-        serial: selectedSerial,
-        source: sourcePath,
-        destPath,
-      });
-      setPlan(report);
-      // Open the manifest dialog whether or not there are conflicts:
-      // even a clean plan benefits from a final confirm so the user
-      // sees the file count before the stream starts. plan.md §5
-      // `overwriteConfirmation: always` for ADB ⇒ batch confirm.
-      setConfirmOpen(true);
-    } catch (e) {
-      setPlanError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setPlanning(false);
-    }
-  }, [selectedSerial, sourcePath, destPath]);
-
-  const confirmAndEnqueue = useCallback(async () => {
-    if (!plan) return;
-    try {
-      const id = await invoke<number>("enqueue_adb_tar_upload", {
-        planToken: plan.planToken,
-      });
-      setLastEnqueued(id);
-      setConfirmOpen(false);
-      setPlan(null);
-    } catch (e) {
-      setPlanError(e instanceof Error ? e.message : String(e));
-    }
-  }, [plan]);
-
-  const cancelConfirm = useCallback(() => {
-    setConfirmOpen(false);
-    setPlan(null);
-  }, []);
-
-  if (!optedIn) {
+  if (!open) {
     return (
       <div className="adb-strip collapsed">
         <span className="adb-label">ADB 고속 업로드</span>
         <span className="adb-meta">
-          USB debugging이 켜진 Android 기기에서 사용 가능한 실험적 빠른 경로
+          USB debugging이 켜진 Android 기기에서 폴더 업로드가 자동으로 빨라집니다.
         </span>
-        <button onClick={() => setOptedIn(true)} className="primary">
-          사용하기
+        <button onClick={() => setOpen(true)} className="ghost">
+          상태 보기
         </button>
       </div>
     );
   }
 
-  const selectedDevice = status?.devices.find((d) => d.serial === selectedSerial) ?? null;
-  const gateReason = computeGateReason(status, selectedDevice);
+  const ready = status?.devices.filter(
+    (d) => d.state === "device" && d.canTarUpload && d.tarExtractSmokeOk,
+  ) ?? [];
+  const banner = computeBanner(status, ready.length);
 
   return (
     <div className="adb-strip">
       <div className="adb-row">
         <span className="adb-label">ADB 고속 업로드</span>
         <button onClick={refresh} disabled={loading}>
-          {loading ? "검사 중..." : "기기 검사"}
+          {loading ? "검사 중..." : "다시 검사"}
         </button>
-        <button onClick={() => setOptedIn(false)} className="ghost">
-          닫기
+        <button onClick={() => setOpen(false)} className="ghost">
+          접기
         </button>
       </div>
 
-      {gateReason && (
-        <div className={`adb-banner ${gateReason.kind}`}>
-          {gateReason.message}
-        </div>
-      )}
+      {banner && <div className={`adb-banner ${banner.kind}`}>{banner.message}</div>}
 
       {status?.adbAvailable && status.devices.length > 0 && (
-        <div className="adb-row">
-          <label className="adb-label">기기</label>
-          <select
-            value={selectedSerial ?? ""}
-            onChange={(e) => setSelectedSerial(e.target.value || null)}
-          >
-            {status.devices.map((d) => (
-              <option key={d.serial} value={d.serial}>
-                {(d.model ?? d.serial) +
-                  " (" +
-                  d.serial +
-                  ", " +
-                  d.state +
-                  (d.canTarUpload ? ", 고속 가능" : ", 고속 불가") +
-                  ")"}
-              </option>
-            ))}
-          </select>
-        </div>
-      )}
-
-      <div className="adb-row">
-        <label className="adb-label">로컬 폴더</label>
-        <input
-          type="text"
-          value={sourcePath}
-          placeholder="/path/to/upload"
-          onChange={(e) => setSourcePath(e.target.value)}
-        />
-        <button onClick={pickSource}>선택...</button>
-      </div>
-      <div className="adb-row">
-        <label className="adb-label">기기 경로</label>
-        <input
-          type="text"
-          value={destPath}
-          placeholder="/sdcard/Download/..."
-          onChange={(e) => setDestPath(e.target.value)}
-        />
-        <button
-          onClick={runPlan}
-          disabled={planning || !selectedDevice?.canTarUpload}
-          className="primary"
-        >
-          {planning ? "준비 중..." : "전송 준비"}
-        </button>
-      </div>
-
-      {planError && <div className="adb-error">{planError}</div>}
-      {lastEnqueued !== null && (
-        <div className="adb-info">전송 작업이 큐에 추가되었습니다 (job #{lastEnqueued}).</div>
-      )}
-
-      {confirmOpen && plan && (
-        <ConflictDialog
-          plan={plan}
-          onConfirm={confirmAndEnqueue}
-          onCancel={cancelConfirm}
-        />
+        <ul className="adb-list">
+          {status.devices.map((d) => (
+            <li key={d.serial}>
+              <b>{d.model ?? d.serial}</b>{" "}
+              <span className="adb-meta">
+                {d.serial} · {d.state}
+                {d.state === "device" &&
+                  (d.canTarUpload && d.tarExtractSmokeOk
+                    ? " · 고속 가능"
+                    : ` · 고속 불가 (tar=${d.hasTar ? "ok" : "없음"}, smoke=${d.tarExtractSmokeOk ? "ok" : "실패"})`)}
+              </span>
+            </li>
+          ))}
+        </ul>
       )}
     </div>
   );
 }
 
-function computeGateReason(
+function computeBanner(
   status: AdbStatusWire | null,
-  device: { canTarUpload: boolean; state: string; hasTar: boolean; tarExtractSmokeOk: boolean } | null,
+  readyCount: number,
 ): { kind: "ok" | "warn" | "error"; message: string } | null {
   if (!status) return null;
   if (!status.adbAvailable) {
     return {
       kind: "error",
       message:
-        "adb 바이너리를 찾지 못했습니다. Android platform-tools를 설치하거나 CROSSMTP_ADB 환경변수를 설정해주세요. (" +
-        (status.error ?? "unknown") +
-        ")",
+        "adb 바이너리를 찾지 못했습니다. Android platform-tools를 설치하거나 CROSSMTP_ADB 환경변수를 설정해주세요." +
+        (status.error ? ` (${status.error})` : ""),
     };
   }
   if (status.devices.length === 0) {
@@ -239,96 +114,22 @@ function computeGateReason(
         "ADB로 인식된 기기가 없습니다. USB debugging이 켜져 있고 'Allow USB debugging' 프롬프트를 수락했는지 확인해주세요.",
     };
   }
-  if (!device) {
-    return { kind: "warn", message: "기기를 선택해주세요." };
-  }
-  if (device.state !== "device") {
+  if (readyCount === 0) {
     return {
       kind: "warn",
       message:
-        "선택한 기기가 사용 가능한 상태가 아닙니다 (" +
-        device.state +
-        "). 폰의 USB debugging 권한을 확인해주세요.",
+        "사용 가능한 기기가 없습니다 — MTP 경로로 업로드됩니다. 위 목록에서 사유를 확인하세요.",
     };
   }
-  if (!device.hasTar) {
-    return {
-      kind: "warn",
-      message:
-        "이 기기에서 tar 명령을 찾지 못했습니다. ADB 고속 모드를 사용할 수 없습니다 — MTP 업로드를 사용해주세요.",
-    };
-  }
-  if (!device.tarExtractSmokeOk) {
-    return {
-      kind: "warn",
-      message:
-        "tar -x smoke check 실패. 이 기기는 ADB 고속 모드에서 안정적이지 않을 수 있습니다 — MTP 업로드를 권장합니다.",
-    };
-  }
-  if (device.canTarUpload) {
+  if (readyCount === 1) {
     return {
       kind: "ok",
-      message:
-        "ADB 고속 업로드가 활성화되었습니다. USB debugging 권한이 유효한 동안에만 작동합니다.",
+      message: "ADB 고속 업로드 사용 가능 — 폴더를 끌어다 놓으면 자동으로 적용됩니다.",
     };
   }
-  return null;
-}
-
-interface DialogProps {
-  plan: AdbPlanReport;
-  onConfirm: () => void;
-  onCancel: () => void;
-}
-
-function ConflictDialog({ plan, onConfirm, onCancel }: DialogProps) {
-  const total = plan.clean.length + plan.skippedSame.length + plan.renamed.length;
-  return (
-    <div className="adb-modal-backdrop" onClick={onCancel}>
-      <div className="adb-modal" onClick={(e) => e.stopPropagation()}>
-        <h3>전송 확인</h3>
-        <p>
-          총 <b>{total}</b>개 파일 — 새 전송 <b>{plan.clean.length}</b>, 동일 파일 건너뜀{" "}
-          <b>{plan.skippedSame.length}</b>, 이름 변경 <b>{plan.renamed.length}</b>
-        </p>
-
-        {plan.skippedSame.length > 0 && (
-          <details>
-            <summary>건너뛸 파일 ({plan.skippedSame.length})</summary>
-            <ul className="adb-list">
-              {plan.skippedSame.slice(0, 200).map((p) => (
-                <li key={p}>{p}</li>
-              ))}
-              {plan.skippedSame.length > 200 && (
-                <li>... 외 {plan.skippedSame.length - 200}개</li>
-              )}
-            </ul>
-          </details>
-        )}
-
-        {plan.renamed.length > 0 && (
-          <details>
-            <summary>이름 변경될 파일 ({plan.renamed.length})</summary>
-            <ul className="adb-list">
-              {plan.renamed.slice(0, 200).map((r) => (
-                <li key={r.original}>
-                  {r.original} → {r.newName}
-                </li>
-              ))}
-              {plan.renamed.length > 200 && <li>... 외 {plan.renamed.length - 200}개</li>}
-            </ul>
-          </details>
-        )}
-
-        <div className="adb-modal-actions">
-          <button onClick={onCancel} className="ghost">
-            취소
-          </button>
-          <button onClick={onConfirm} className="primary">
-            전송 시작
-          </button>
-        </div>
-      </div>
-    </div>
-  );
+  return {
+    kind: "warn",
+    message:
+      "고속 가능한 기기가 2개 이상이라 자동 라우팅을 비활성화했습니다 (한 대만 연결하면 자동 적용).",
+  };
 }

@@ -20,6 +20,8 @@ import {
   Storage,
   TransferEvent,
   LocalEntry,
+  AdbStatusWire,
+  AdbPlanReport,
 } from "./types";
 import { AdbPanel } from "./components/AdbPanel";
 import { Banner } from "./components/Banner";
@@ -320,32 +322,12 @@ export function App() {
     downloadLocalFile(JSON.stringify(entry));
   }, [downloadLocalFile]);
 
-  const uploadMTPFile = useCallback(async (entryData: string) => {
-    if (!activeStorage) return;
-    const parent = breadcrumb[breadcrumb.length - 1]?.id ?? PARENT_ROOT;
-    try {
-      const entry: LocalEntry = JSON.parse(entryData);
-
-      const ids = await invoke<number[]>("enqueue_upload", {
-        storageId: activeStorage.id,
-        parentId: parent,
-        source: entry.path,
-        conflict: conflictPolicy,
-      });
-      rememberGroup(ids, entry.name, entry.isDir, setJobGroups);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      alert("업로드 오류: " + msg);
-      setBrowserError(msg);
-    }
-    setTimeout(() => {
-      if (activeStorage) loadEntries(activeStorage.id, parent);
-    }, 1500);
-  }, [activeStorage, breadcrumb, conflictPolicy, loadEntries]);
-
+  // Internal drag from LocalBrowser → Browser. Funnel through the same
+  // `uploadFiles` path so ADB auto-routing applies here too. (Without
+  // this the user would only get fast path on Finder drag-drop.)
   const uploadLocalEntry = useCallback((entry: LocalEntry) => {
-    uploadMTPFile(JSON.stringify(entry));
-  }, [uploadMTPFile]);
+    uploadFilesRef.current([entry.path]);
+  }, []);
 
   const startLocalDrag = useCallback((entry: LocalEntry, point: { x: number; y: number }) => {
     setInternalDrag({ type: "local", item: entry, label: entry.name, ...point });
@@ -398,7 +380,49 @@ export function App() {
       }
       const parent = breadcrumb[breadcrumb.length - 1]?.id ?? PARENT_ROOT;
       const failures: string[] = [];
-      for (const path of paths) {
+
+      // Phase A.0 — auto-routing: directories on internal storage may
+      // qualify for the ADB tar fast path. Files always stay on MTP.
+      const adbEligible: string[] = [];
+      const mtpForced: string[] = [];
+      for (const p of paths) {
+        try {
+          const st = await invoke<{ isDir: boolean; exists: boolean }>(
+            "local_stat",
+            { path: p },
+          );
+          if (st.exists && st.isDir) adbEligible.push(p);
+          else mtpForced.push(p);
+        } catch {
+          mtpForced.push(p);
+        }
+      }
+
+      const adbHandled = new Set<string>();
+      if (adbEligible.length > 0) {
+        try {
+          const route = await routeFoldersViaAdb(
+            adbEligible,
+            activeStorage,
+            breadcrumb,
+            setJobGroups,
+          );
+          for (const p of route.handled) adbHandled.add(p);
+          for (const msg of route.errors) failures.push(msg);
+        } catch (e) {
+          // Never let an ADB-routing throw kill the React tree —
+          // surface it on the banner and fall back to MTP for everything.
+          failures.push(
+            `[ADB 라우팅 예외] ${e instanceof Error ? e.message : String(e)}`,
+          );
+        }
+      }
+
+      const mtpPaths = [
+        ...mtpForced,
+        ...adbEligible.filter((p) => !adbHandled.has(p)),
+      ];
+      for (const path of mtpPaths) {
         try {
           const ids = await invoke<number[]>("enqueue_upload", {
             storageId: activeStorage.id,
@@ -520,6 +544,120 @@ function rememberGroup(
     }
     return next;
   });
+}
+
+// Phase A.0 — auto-routing helper. Tries to push directory uploads
+// through the ADB tar fast path when:
+//   • exactly one ADB device is in `device` state and tar-capable
+//   • we can confirm an internal-storage absolute root (/sdcard)
+//   • the active MTP storage looks like internal storage (single storage
+//     OR description contains internal/shared/phone). SD-card mapping is
+//     out of scope (plan.md §2.1).
+//   • dest path under /sdcard can be derived from the breadcrumb.
+// Anything that fails any check is silently returned to the MTP path
+// — this helper never throws on capability gaps.
+async function routeFoldersViaAdb(
+  folderPaths: string[],
+  storage: Storage,
+  breadcrumb: BreadcrumbNode[],
+  setJobGroups: Dispatch<SetStateAction<Map<number, QueueGroupView>>>,
+): Promise<{ handled: string[]; errors: string[] }> {
+  const handled: string[] = [];
+  const errors: string[] = [];
+
+  const raw = storage.description ?? "";
+  const desc = raw.toLowerCase();
+  // SD-card descriptions usually contain "sd"/"card"/"카드"/"외장" so we
+  // gate them out explicitly to avoid false-positive on dual-storage
+  // devices where internal storage doesn't ship a Latin label.
+  const looksSdCard =
+    desc.includes("sd") ||
+    desc.includes("card") ||
+    raw.includes("카드") ||
+    raw.includes("외장");
+  const looksInternal =
+    !looksSdCard &&
+    (desc.includes("internal") ||
+      desc.includes("shared") ||
+      desc.includes("phone") ||
+      raw.includes("내부") ||
+      raw.includes("공유") ||
+      raw.includes("저장") ||
+      desc === "" ||
+      desc === "root");
+  if (!looksInternal) return { handled, errors };
+
+  let status: AdbStatusWire;
+  try {
+    status = await invoke<AdbStatusWire>("adb_status");
+  } catch {
+    return { handled, errors };
+  }
+  if (!status.adbAvailable) return { handled, errors };
+  const ready = status.devices.filter(
+    (d) => d.state === "device" && d.canTarUpload && d.tarExtractSmokeOk,
+  );
+  if (ready.length !== 1) return { handled, errors };
+  const dev = ready[0];
+
+  let root: string | null = null;
+  try {
+    root = await invoke<string | null>("adb_internal_storage_root", {
+      serial: dev.serial,
+    });
+  } catch {
+    return { handled, errors };
+  }
+  if (!root) return { handled, errors };
+
+  // breadcrumb[0] is the storage root label, not a real folder name on
+  // /sdcard. Skip it; everything after is a real folder name.
+  const rel = breadcrumb.slice(1).map((b) => b.name).join("/");
+  const destBase = rel ? `${root}/${rel}` : root;
+
+  for (const folder of folderPaths) {
+    const folderName = basename(folder);
+    const dest = `${destBase}/${folderName}`;
+    let report: AdbPlanReport;
+    try {
+      report = await invoke<AdbPlanReport>("adb_plan_upload", {
+        serial: dev.serial,
+        source: folder,
+        destPath: dest,
+      });
+    } catch (e) {
+      // Plan failure → don't claim this folder; let MTP handle it.
+      errors.push(
+        `ADB 준비 실패(${folderName}): ${e instanceof Error ? e.message : String(e)} — MTP로 시도합니다.`,
+      );
+      continue;
+    }
+
+    const totalConflicts = report.skippedSame.length + report.renamed.length;
+    if (totalConflicts > 0) {
+      const msg =
+        `'${folderName}' 폴더를 고속(ADB) 업로드합니다.\n\n` +
+        `• 새 파일: ${report.clean.length}\n` +
+        `• 동일 파일 건너뜀: ${report.skippedSame.length}\n` +
+        `• 이름 변경 후 업로드: ${report.renamed.length}\n\n` +
+        `진행하시겠어요? (아니오를 선택하면 기존 MTP로 전송)`;
+      const proceed = await ask(msg, { title: "ADB 고속 업로드 확인", kind: "info" });
+      if (!proceed) continue; // → falls through to MTP
+    }
+
+    try {
+      const id = await invoke<number>("enqueue_adb_tar_upload", {
+        planToken: report.planToken,
+      });
+      rememberGroup([id], `${folderName} (ADB)`, true, setJobGroups);
+      handled.push(folder);
+    } catch (e) {
+      errors.push(
+        `ADB 전송 시작 실패(${folderName}): ${e instanceof Error ? e.message : String(e)} — MTP로 시도합니다.`,
+      );
+    }
+  }
+  return { handled, errors };
 }
 
 function basename(path: string): string {

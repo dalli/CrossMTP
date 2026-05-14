@@ -1196,18 +1196,20 @@ impl Worker {
         self.transition(id, JobState::Transferring);
 
         let session = Arc::clone(&adb.session);
-        // Phase 4 byte-level progress: feed each ~100ms-throttled byte
-        // count from the tar sink straight onto the orchestrator's event
-        // channel as a `Progress { sent = total = bytes_written }` pair.
-        // Total stays equal to sent because we don't know the final
-        // archive size in advance — the UI treats sent/total ratio as
-        // "in motion" when both move together.
+        // Estimate the total payload size up-front by walking the source
+        // tree once. Tar header overhead (~512 B per entry + 1 KiB EOF)
+        // is ignored — for typical media it's <0.5 % and the user sees a
+        // monotonically progressing bar instead of a stuck-at-100 % one.
+        let mut total_bytes: u64 = 0;
+        let mut total_files: u32 = 0;
+        self.scan_local_dir(&source, &mut total_bytes, &mut total_files);
+
         let evt_tx = self.evt_tx.clone();
         let on_progress: adb_session::ProgressCallback = Box::new(move |bytes| {
             let _ = evt_tx.send(Event::Progress {
                 id,
-                sent: bytes,
-                total: bytes,
+                sent: bytes.min(total_bytes.max(bytes)),
+                total: total_bytes.max(bytes),
             });
         });
         let outcome = adb_session::upload_tar_with_progress(
@@ -1224,10 +1226,11 @@ impl Worker {
             Ok(o) => o.progress.bytes_emitted,
             Err(_) => 0,
         };
+        let final_total = total_bytes.max(bytes);
         let _ = self.evt_tx.send(Event::Progress {
             id,
-            sent: bytes,
-            total: bytes,
+            sent: bytes.min(final_total),
+            total: final_total,
         });
 
         match outcome {

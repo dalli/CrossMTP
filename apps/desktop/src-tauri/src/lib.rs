@@ -80,7 +80,7 @@ struct DeviceSnapshot {
 }
 
 #[derive(Clone, Serialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
+#[serde(tag = "type", rename_all = "camelCase", rename_all_fields = "camelCase")]
 enum WireEvent {
     Enqueued { id: u64, kind: WireKind },
     StateChanged { id: u64, state: WireState },
@@ -96,7 +96,7 @@ enum WireEvent {
 }
 
 #[derive(Debug, Clone, Serialize)]
-#[serde(tag = "kind", rename_all = "camelCase")]
+#[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
 enum WireKind {
     Download {
         storage_id: u32,
@@ -1108,6 +1108,66 @@ fn enqueue_adb_tar_upload(
     Ok(id.0)
 }
 
+/// Lightweight stat for a local path. Used by the UI to decide whether
+/// a dropped path is a directory (→ candidate for ADB tar fast path) or
+/// a single file (→ stays on MTP). Errors only on missing/permission.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalStatWire {
+    is_dir: bool,
+    exists: bool,
+}
+
+#[tauri::command]
+fn local_stat(path: String) -> Result<LocalStatWire, String> {
+    match std::fs::metadata(&path) {
+        Ok(md) => Ok(LocalStatWire {
+            is_dir: md.is_dir(),
+            exists: true,
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(LocalStatWire {
+            is_dir: false,
+            exists: false,
+        }),
+        Err(e) => Err(format!("{e}")),
+    }
+}
+
+/// Verify that `/sdcard` (= internal shared storage on virtually every
+/// modern Android device) is reachable & writable on the given serial.
+/// Returns the absolute device path if usable, otherwise `Ok(None)` so
+/// the UI can silently fall back to MTP. Errors only on adb-session
+/// plumbing failures.
+///
+/// We do not currently attempt to map MTP storage descriptions to SD-card
+/// or OTG paths — that's deferred (plan.md §2.1, §4.1). The single
+/// "internal" root covers ~all phones in the stated MVP scope.
+#[tauri::command]
+fn adb_internal_storage_root(
+    serial: String,
+    state: State<'_, AppState>,
+) -> Result<Option<String>, String> {
+    let session = state
+        .adb_session
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(Arc::clone)
+        .ok_or_else(|| "ADB 세션이 초기화되지 않았습니다.".to_string())?;
+    // `ls -d /sdcard` is enough: exit 0 + no stderr means the path is
+    // present and the shell user can stat it. We don't probe writability
+    // here — the smoke check on the AdbContext already covers tar -x on
+    // /sdcard (see `smoke_check_extract`).
+    let out = session
+        .shell(&serial, &["ls", "-d", "/sdcard"])
+        .map_err(|e| format!("adb shell 실패: {e}"))?;
+    if out.exit_code == 0 && out.stdout.contains("/sdcard") {
+        Ok(Some("/sdcard".to_string()))
+    } else {
+        Ok(None)
+    }
+}
+
 /// Cancel an ADB job by id and serial — we don't track which serial owns
 /// which id on the JS side, so the JS layer passes the serial that
 /// minted the plan.
@@ -1205,6 +1265,8 @@ pub fn run() {
             adb_plan_upload,
             enqueue_adb_tar_upload,
             adb_cancel_job,
+            adb_internal_storage_root,
+            local_stat,
         ])
         .setup(|app| {
             // Friendly default window title with version.
