@@ -10,6 +10,7 @@ path = "src/lib.rs"
 
 [dependencies]
 thiserror = "1"
+tar-stream = { path = "../tar-stream" }
 
 [lints]
 workspace = true

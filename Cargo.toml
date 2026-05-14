@@ -4,6 +4,7 @@ members = [
     "crates/mtp-probe",
     "crates/mtp-session",
     "crates/adb-session",
+    "crates/tar-stream",
     "crates/orchestrator",
     "crates/mtp-cli",
     "apps/desktop/src-tauri",

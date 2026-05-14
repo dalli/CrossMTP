@@ -6,6 +6,7 @@ version = 4
 name = "adb-session"
 version = "0.0.2"
 dependencies = [
+ "tar-stream",
  "thiserror 1.0.69",
 ]
 
@@ -1978,6 +1979,7 @@ dependencies = [
  "adb-session",
  "mtp-session",
  "orchestrator",
+ "tar-stream",
 ]
 
 [[package]]
@@ -3480,6 +3482,13 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "tar-stream"
+version = "0.0.2"
+dependencies = [
+ "thiserror 1.0.69",
 ]
 
 [[package]]

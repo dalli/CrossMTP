@@ -73,7 +73,10 @@ fn print_usage(prog: &str) {
          {prog} adb where                          (resolve adb executable and source)\n  \
          {prog} adb devices                        (list adb devices with classified state)\n  \
          {prog} adb probe [serial]                 (Phase 1 capability probe: discovery + state + shell echo)\n  \
-         {prog} adb shell <serial> -- <cmd...>     (run an adb shell command, capture stdout/stderr)"
+         {prog} adb shell <serial> -- <cmd...>     (run an adb shell command, capture stdout/stderr)\n  \
+         {prog} adb caps <serial>                  (Phase 2 per-device capability: tar/find/stat probe)\n  \
+         {prog} adb manifest <serial> <root>       (Phase 2 manifest probe: find ... stat under <root>)\n  \
+         {prog} adb tar-upload <serial> <src> <dest>  (Phase 2 streaming upload: tar | adb shell tar -x)"
     );
 }
 
@@ -608,7 +611,9 @@ fn cmd_adb(rest: &[String]) -> ExitCode {
     let (sub, rest) = match rest.split_first() {
         Some((s, r)) => (s.as_str(), r),
         None => {
-            eprintln!("usage: adb {{where|devices|probe|shell}} [...]");
+            eprintln!(
+                "usage: adb {{where|devices|probe|shell|caps|manifest|tar-upload}} [...]"
+            );
             return ExitCode::from(1);
         }
     };
@@ -710,11 +715,91 @@ fn cmd_adb(rest: &[String]) -> ExitCode {
         Ok(())
     }
 
+    fn cmd_adb_caps(serial: &str) -> std::result::Result<(), AdbError> {
+        let session = AdbSession::open()?;
+        let _ = session.require_device(serial)?;
+        let caps = adb_session::probe_device(&session, serial)?;
+        println!(
+            "tar={} find={} stat={} smoke_ok={} tar_impl={:?}",
+            caps.has_tar,
+            caps.has_find,
+            caps.has_stat,
+            caps.tar_extract_smoke_ok,
+            caps.tar_impl,
+        );
+        println!("can_tar_upload={}", caps.can_tar_upload());
+        Ok(())
+    }
+
+    fn cmd_adb_manifest(serial: &str, root: &str) -> std::result::Result<(), AdbError> {
+        let session = AdbSession::open()?;
+        let _ = session.require_device(serial)?;
+        let m = adb_session::probe_manifest(&session, serial, root)?;
+        println!("manifest under {} ({} entries):", m.root, m.len());
+        let mut keys: Vec<&String> = m.entries.keys().collect();
+        keys.sort();
+        for k in keys {
+            let e = &m.entries[k];
+            println!("  {:>10}  mtime={}  {}", e.size, e.mtime_secs, k);
+        }
+        Ok(())
+    }
+
+    fn cmd_adb_tar_upload(
+        serial: &str,
+        src: &str,
+        dest: &str,
+    ) -> std::result::Result<(), AdbError> {
+        let session = AdbSession::open()?;
+        let _ = session.require_device(serial)?;
+        let cancel = adb_session::CancelHandle::new();
+        let outcome = adb_session::upload_tar(
+            &session,
+            serial,
+            std::path::Path::new(src),
+            dest,
+            tar_stream::ConflictPlan::new(),
+            cancel,
+        )?;
+        println!(
+            "files_emitted={} files_skipped={} bytes={} host_exit={:?}",
+            outcome.progress.files_emitted,
+            outcome.progress.files_skipped,
+            outcome.progress.bytes_emitted,
+            outcome.host_exit_code,
+        );
+        if !outcome.stderr_tail.is_empty() {
+            eprintln!("stderr: {}", outcome.stderr_tail);
+        }
+        Ok(())
+    }
+
     let result: std::result::Result<(), AdbError> = match sub {
         "where" => cmd_adb_where(),
         "devices" => cmd_adb_devices(),
         "probe" => cmd_adb_probe(rest.first().map(|s| s.as_str())),
         "shell" => cmd_adb_shell(rest),
+        "caps" => {
+            if rest.is_empty() {
+                eprintln!("usage: adb caps <serial>");
+                return ExitCode::from(1);
+            }
+            cmd_adb_caps(&rest[0])
+        }
+        "manifest" => {
+            if rest.len() < 2 {
+                eprintln!("usage: adb manifest <serial> <root>");
+                return ExitCode::from(1);
+            }
+            cmd_adb_manifest(&rest[0], &rest[1])
+        }
+        "tar-upload" => {
+            if rest.len() < 3 {
+                eprintln!("usage: adb tar-upload <serial> <src> <dest>");
+                return ExitCode::from(1);
+            }
+            cmd_adb_tar_upload(&rest[0], &rest[1], &rest[2])
+        }
         other => {
             eprintln!("unknown adb subcommand: {other}");
             return ExitCode::from(1);

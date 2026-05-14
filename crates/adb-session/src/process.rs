@@ -180,6 +180,37 @@ impl AdbProcess {
         })
     }
 
+    /// Wait for the child to exit on its own (no signals sent). Use
+    /// this for the **normal-completion** path after the caller has
+    /// already drained / dropped stdin so the child will see EOF and
+    /// exit. Returns captured stdout+stderr and the exit code.
+    ///
+    /// Calling this on an already-disposed handle returns
+    /// `AdbError::CommandTerminated`.
+    pub fn wait_capture(&mut self) -> Result<AdbOutput> {
+        let Some(mut child) = self.child.take() else {
+            return Err(AdbError::CommandTerminated);
+        };
+        // Drain stdout/stderr BEFORE wait — wait can deadlock if the
+        // pipes are full, but with our typical tar -x volume that's
+        // fine since we already closed stdin.
+        let mut stdout = String::new();
+        let mut stderr = String::new();
+        if let Some(mut s) = child.stdout.take() {
+            let _ = s.read_to_string(&mut stdout);
+        }
+        if let Some(mut s) = child.stderr.take() {
+            let _ = s.read_to_string(&mut stderr);
+        }
+        let status = child.wait()?;
+        let code = status.code().unwrap_or(-1);
+        Ok(AdbOutput {
+            exit_code: code,
+            stdout,
+            stderr,
+        })
+    }
+
     /// Force SIGKILL — used by tests and by the Drop backstop.
     pub fn kill(&mut self) -> Result<()> {
         if let Some(mut child) = self.child.take() {

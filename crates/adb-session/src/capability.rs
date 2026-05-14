@@ -35,4 +35,18 @@ impl AdbCapabilities {
             can_track_child_processes: true,
         }
     }
+
+    /// Phase 2 promotes `adb_tar_upload` to true at the layer level —
+    /// the Tar Stream Builder + manifest probe + AdbProcess streaming
+    /// integration are all in place. **Per-device** availability still
+    /// has to clear `DeviceCapabilities::can_tar_upload()` before the UI
+    /// shows ADB as the recommended path.
+    pub const fn phase2_default() -> Self {
+        Self {
+            adb_availability_probe: true,
+            adb_tar_upload: true,
+            can_run_shell: true,
+            can_track_child_processes: true,
+        }
+    }
 }

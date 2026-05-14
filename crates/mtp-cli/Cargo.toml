@@ -11,6 +11,7 @@ path = "src/main.rs"
 [dependencies]
 mtp-session = { path = "../mtp-session" }
 adb-session = { path = "../adb-session" }
+tar-stream = { path = "../tar-stream" }
 orchestrator = { path = "../orchestrator" }
 
 [lints]

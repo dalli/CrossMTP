@@ -47,7 +47,7 @@ impl AdbSession {
         Ok(Self {
             location,
             runner,
-            capabilities: AdbCapabilities::phase1_default(),
+            capabilities: AdbCapabilities::phase2_default(),
         })
     }
 
@@ -58,7 +58,7 @@ impl AdbSession {
         Self {
             location,
             runner,
-            capabilities: AdbCapabilities::phase1_default(),
+            capabilities: AdbCapabilities::phase2_default(),
         }
     }
 
