@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "adb-session"
-version = "0.0.2"
+version = "0.1.0"
 dependencies = [
  "tar-stream",
  "thiserror 1.0.69",
@@ -464,7 +464,7 @@ checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
 
 [[package]]
 name = "crossmtp-desktop"
-version = "0.0.2"
+version = "0.1.0"
 dependencies = [
  "adb-session",
  "mtp-session",
@@ -1976,7 +1976,7 @@ dependencies = [
 
 [[package]]
 name = "mtp-cli"
-version = "0.0.2"
+version = "0.1.0"
 dependencies = [
  "adb-session",
  "mtp-session",
@@ -1986,14 +1986,14 @@ dependencies = [
 
 [[package]]
 name = "mtp-probe"
-version = "0.0.2"
+version = "0.1.0"
 dependencies = [
  "pkg-config",
 ]
 
 [[package]]
 name = "mtp-session"
-version = "0.0.2"
+version = "0.1.0"
 dependencies = [
  "bindgen",
  "pkg-config",
@@ -2248,7 +2248,7 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 
 [[package]]
 name = "orchestrator"
-version = "0.0.2"
+version = "0.1.0"
 dependencies = [
  "adb-session",
  "mtp-session",
@@ -3490,7 +3490,7 @@ dependencies = [
 
 [[package]]
 name = "tar-stream"
-version = "0.0.2"
+version = "0.1.0"
 dependencies = [
  "thiserror 1.0.69",
 ]
