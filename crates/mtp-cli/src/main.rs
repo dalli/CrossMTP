@@ -36,6 +36,7 @@ fn main() -> ExitCode {
         "push" => cmd_push(&session, rest),
         "verify" => cmd_verify(&session),
         "verify-q" => cmd_verify_q(&session),
+        "adb" => return cmd_adb(rest),
         "help" | "--help" | "-h" => {
             print_usage(&args[0]);
             return ExitCode::SUCCESS;
@@ -68,7 +69,17 @@ fn print_usage(prog: &str) {
          {prog} pull <storage_id> <file_id> <dest_path>\n  \
          {prog} push <storage_id> <parent_id> <src_path>\n  \
          {prog} verify   (single-process read+write probe via mtp-session)\n  \
-         {prog} verify-q (single-process probe via Phase 2 orchestrator: progress + cancel + conflict)"
+         {prog} verify-q (single-process probe via Phase 2 orchestrator: progress + cancel + conflict)\n  \
+         {prog} adb where                          (resolve adb executable and source)\n  \
+         {prog} adb devices                        (list adb devices with classified state)\n  \
+         {prog} adb probe [serial]                 (Phase 1 capability probe: discovery + state + shell echo)\n  \
+         {prog} adb shell <serial> -- <cmd...>     (run an adb shell command, capture stdout/stderr)\n  \
+         {prog} adb caps <serial>                  (Phase 2 per-device capability: tar/find/stat probe)\n  \
+         {prog} adb manifest <serial> <root>       (Phase 2 manifest probe: find ... stat under <root>)\n  \
+         {prog} adb tar-upload <serial> <src> <dest>  (Phase 2 streaming upload: tar | adb shell tar -x)\n  \
+         {prog} adb smoke <serial>                 (Phase 3 active tar -x smoke check)\n  \
+         {prog} adb plan <serial> <src> <dest>     (Phase 3 conflict planner dry-run: report only)\n  \
+         {prog} adb verify-q <serial> <src> <dest> (Phase 3 orchestrator end-to-end: AdbTarUpload job)"
     );
 }
 
@@ -593,6 +604,409 @@ fn drain_until_terminal_with_label(
         }
     }
     None
+}
+
+/// Dispatch the `adb <sub>` subcommands. Returns ExitCode directly so the
+/// adb error model (`AdbError`) doesn't need to be cross-cast to `MtpError`.
+fn cmd_adb(rest: &[String]) -> ExitCode {
+    use adb_session::{AdbError, AdbSession};
+
+    let (sub, rest) = match rest.split_first() {
+        Some((s, r)) => (s.as_str(), r),
+        None => {
+            eprintln!(
+                "usage: adb {{where|devices|probe|shell|caps|manifest|tar-upload}} [...]"
+            );
+            return ExitCode::from(1);
+        }
+    };
+
+    fn cmd_adb_where() -> std::result::Result<(), AdbError> {
+        let loc = adb_session::discover_adb()?;
+        println!("adb path:   {}", loc.path.display());
+        println!("adb source: {:?}", loc.source);
+        Ok(())
+    }
+
+    fn cmd_adb_devices() -> std::result::Result<(), AdbError> {
+        let session = AdbSession::open()?;
+        let devs = session.list_devices()?;
+        if devs.is_empty() {
+            println!("(no devices)");
+            return Ok(());
+        }
+        for d in &devs {
+            println!(
+                "{:<24} state={:<14} transport_id={} model={} product={}",
+                d.serial,
+                format!("{:?}", d.state),
+                d.transport_id
+                    .map(|t| t.to_string())
+                    .unwrap_or_else(|| "-".into()),
+                d.model.as_deref().unwrap_or("-"),
+                d.product.as_deref().unwrap_or("-"),
+            );
+        }
+        Ok(())
+    }
+
+    fn cmd_adb_probe(serial_arg: Option<&str>) -> std::result::Result<(), AdbError> {
+        println!("=== adb probe ===");
+        let session = AdbSession::open()?;
+        let loc = session.location();
+        println!("adb: {} ({:?})", loc.path.display(), loc.source);
+        let cap = session.capabilities();
+        println!(
+            "caps: probe={} tar_upload={} shell={} child_tracking={}",
+            cap.adb_availability_probe,
+            cap.adb_tar_upload,
+            cap.can_run_shell,
+            cap.can_track_child_processes,
+        );
+        let device = match serial_arg {
+            Some(s) => session.require_device(s)?,
+            None => session.pick_ready_device()?,
+        };
+        println!(
+            "device: serial={} state={:?} model={:?} product={:?}",
+            device.serial, device.state, device.model, device.product,
+        );
+        // Phase 1 shell smoke check: device-side getprop is cheap and
+        // proves the shell pipe works without writing anything.
+        let out = session.shell(&device.serial, &["getprop", "ro.build.version.release"])?;
+        println!(
+            "shell exit={} ro.build.version.release={}",
+            out.exit_code,
+            out.stdout.trim()
+        );
+        Ok(())
+    }
+
+    fn cmd_adb_shell(rest: &[String]) -> std::result::Result<(), AdbError> {
+        if rest.len() < 2 {
+            eprintln!("usage: adb shell <serial> -- <cmd...>");
+            return Err(AdbError::CommandFailed {
+                code: -1,
+                stderr: "missing args".into(),
+            });
+        }
+        let serial = &rest[0];
+        // Accept either `shell SER -- echo hi` or `shell SER echo hi`.
+        let cmd_start = if rest[1] == "--" { 2 } else { 1 };
+        if cmd_start >= rest.len() {
+            eprintln!("usage: adb shell <serial> -- <cmd...>");
+            return Err(AdbError::CommandFailed {
+                code: -1,
+                stderr: "missing command".into(),
+            });
+        }
+        let cmd: Vec<&str> = rest[cmd_start..].iter().map(|s| s.as_str()).collect();
+        let session = AdbSession::open()?;
+        let out = session.shell(serial, &cmd)?;
+        if !out.stdout.is_empty() {
+            print!("{}", out.stdout);
+        }
+        if !out.stderr.is_empty() {
+            eprint!("{}", out.stderr);
+        }
+        if out.exit_code != 0 {
+            return Err(AdbError::CommandFailed {
+                code: out.exit_code,
+                stderr: out.stderr,
+            });
+        }
+        Ok(())
+    }
+
+    fn cmd_adb_caps(serial: &str) -> std::result::Result<(), AdbError> {
+        let session = AdbSession::open()?;
+        let _ = session.require_device(serial)?;
+        let caps = adb_session::probe_device(&session, serial)?;
+        println!(
+            "tar={} find={} stat={} smoke_ok={} tar_impl={:?}",
+            caps.has_tar,
+            caps.has_find,
+            caps.has_stat,
+            caps.tar_extract_smoke_ok,
+            caps.tar_impl,
+        );
+        println!("can_tar_upload={}", caps.can_tar_upload());
+        Ok(())
+    }
+
+    fn cmd_adb_manifest(serial: &str, root: &str) -> std::result::Result<(), AdbError> {
+        let session = AdbSession::open()?;
+        let _ = session.require_device(serial)?;
+        let m = adb_session::probe_manifest(&session, serial, root)?;
+        println!("manifest under {} ({} entries):", m.root, m.len());
+        let mut keys: Vec<&String> = m.entries.keys().collect();
+        keys.sort();
+        for k in keys {
+            let e = &m.entries[k];
+            println!("  {:>10}  mtime={}  {}", e.size, e.mtime_secs, k);
+        }
+        Ok(())
+    }
+
+    fn cmd_adb_smoke(serial: &str) -> std::result::Result<(), AdbError> {
+        let session = AdbSession::open()?;
+        let _ = session.require_device(serial)?;
+        let ok = adb_session::smoke_check_extract(&session, serial)?;
+        println!("tar_extract_smoke_ok={ok}");
+        Ok(())
+    }
+
+    fn cmd_adb_plan(
+        serial: &str,
+        src: &str,
+        dest: &str,
+    ) -> std::result::Result<(), AdbError> {
+        use std::path::Path;
+        let session = AdbSession::open()?;
+        let _ = session.require_device(serial)?;
+        let remote = adb_session::probe_manifest(&session, serial, dest)?;
+        // Walk local src using tar-stream's traversal so the rel paths
+        // match exactly what the streamer will emit.
+        let entries = tar_stream::walk(Path::new(src)).map_err(|e| AdbError::CommandFailed {
+            code: -1,
+            stderr: format!("local walk failed: {e}"),
+        })?;
+        let mut locals: Vec<adb_session::LocalFile> = Vec::new();
+        for e in entries {
+            if !matches!(e.kind, tar_stream::EntryKind::File) {
+                continue;
+            }
+            locals.push(adb_session::LocalFile {
+                rel_path: e.relative.join("/"),
+                size: e.size,
+                mtime_secs: e.mtime_secs,
+            });
+        }
+        let policy = adb_session::UploadPolicy::plan_defaults();
+        let (_, report) = adb_session::plan_upload(&adb_session::PlanRequest {
+            locals: &locals,
+            remote: &remote,
+            policy: &policy,
+        })
+        .map_err(|e| AdbError::CommandFailed {
+            code: -1,
+            stderr: format!("plan failed: {e}"),
+        })?;
+        println!(
+            "locals={} remote={} clean={} skipped_same={} renamed={}",
+            locals.len(),
+            remote.len(),
+            report.clean_count(),
+            report.skipped_count(),
+            report.renamed_count()
+        );
+        for r in &report.skipped_same {
+            println!("  SKIP {r}");
+        }
+        for (orig, new) in &report.renamed {
+            println!("  RENAME {orig} -> {new}");
+        }
+        Ok(())
+    }
+
+    fn cmd_adb_verify_q(
+        serial: &str,
+        src: &str,
+        dest: &str,
+    ) -> std::result::Result<(), AdbError> {
+        use std::path::{Path, PathBuf};
+        use std::sync::Arc;
+        let session = Arc::new(AdbSession::open()?);
+        let _ = session.require_device(serial)?;
+
+        // Probe + plan up-front so the orchestrator job receives a
+        // ready-to-stream ConflictPlan (plan.md §5 ADB requirement).
+        let remote = adb_session::probe_manifest(&session, serial, dest)?;
+        let entries = tar_stream::walk(Path::new(src)).map_err(|e| AdbError::CommandFailed {
+            code: -1,
+            stderr: format!("walk: {e}"),
+        })?;
+        let mut locals: Vec<adb_session::LocalFile> = Vec::new();
+        for e in entries {
+            if !matches!(e.kind, tar_stream::EntryKind::File) {
+                continue;
+            }
+            locals.push(adb_session::LocalFile {
+                rel_path: e.relative.join("/"),
+                size: e.size,
+                mtime_secs: e.mtime_secs,
+            });
+        }
+        let policy = adb_session::UploadPolicy::plan_defaults();
+        let (plan, report) = adb_session::plan_upload(&adb_session::PlanRequest {
+            locals: &locals,
+            remote: &remote,
+            policy: &policy,
+        })
+        .map_err(|e| AdbError::CommandFailed {
+            code: -1,
+            stderr: format!("plan: {e}"),
+        })?;
+        println!(
+            "plan: clean={} skipped={} renamed={}",
+            report.clean_count(),
+            report.skipped_count(),
+            report.renamed_count()
+        );
+
+        let adb_ctx = orchestrator::AdbContext {
+            session: session.clone(),
+            serial: serial.to_string(),
+            capabilities: None,
+        };
+        let (orch, events) = orchestrator::Orchestrator::start_with_adb(None, Some(adb_ctx));
+
+        let id = orch.enqueue(orchestrator::JobSpec {
+            kind: orchestrator::JobKind::AdbTarUpload {
+                serial: serial.to_string(),
+                source: PathBuf::from(src),
+                dest_path: dest.to_string(),
+                plan,
+            },
+            conflict: orchestrator::ConflictPolicy::Skip,
+        });
+        println!("[{}] enqueued AdbTarUpload {} -> {}", id.0, src, dest);
+
+        let deadline = Instant::now() + Duration::from_secs(600);
+        while Instant::now() < deadline {
+            let rem = deadline.saturating_duration_since(Instant::now());
+            match events.recv_timeout(rem.min(Duration::from_millis(500))) {
+                Ok(orchestrator::Event::StateChanged { id: ev, state }) if ev == id => {
+                    println!("  [{}] state -> {:?}", id.0, state);
+                    if state.is_terminal() {
+                        orch.shutdown();
+                        return match state {
+                            orchestrator::JobState::Completed { .. } => Ok(()),
+                            orchestrator::JobState::Skipped(_) => Ok(()),
+                            orchestrator::JobState::Cancelled => Err(AdbError::CommandFailed {
+                                code: -1,
+                                stderr: "cancelled".into(),
+                            }),
+                            orchestrator::JobState::Failed(msg) => Err(AdbError::CommandFailed {
+                                code: -1,
+                                stderr: msg,
+                            }),
+                            _ => unreachable!(),
+                        };
+                    }
+                }
+                Ok(orchestrator::Event::Progress { id: ev, sent, total }) if ev == id => {
+                    println!("  [{}] progress {} / {}", id.0, sent, total);
+                }
+                Ok(_) => {}
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(_) => break,
+            }
+        }
+        orch.shutdown();
+        Err(AdbError::CommandFailed {
+            code: -1,
+            stderr: "verify-q timed out".into(),
+        })
+    }
+
+    fn cmd_adb_tar_upload(
+        serial: &str,
+        src: &str,
+        dest: &str,
+    ) -> std::result::Result<(), AdbError> {
+        let session = AdbSession::open()?;
+        let _ = session.require_device(serial)?;
+        let cancel = adb_session::CancelHandle::new();
+        let outcome = adb_session::upload_tar(
+            &session,
+            serial,
+            std::path::Path::new(src),
+            dest,
+            tar_stream::ConflictPlan::new(),
+            cancel,
+        )?;
+        println!(
+            "files_emitted={} files_skipped={} bytes={} host_exit={:?}",
+            outcome.progress.files_emitted,
+            outcome.progress.files_skipped,
+            outcome.progress.bytes_emitted,
+            outcome.host_exit_code,
+        );
+        if !outcome.stderr_tail.is_empty() {
+            eprintln!("stderr: {}", outcome.stderr_tail);
+        }
+        Ok(())
+    }
+
+    let result: std::result::Result<(), AdbError> = match sub {
+        "where" => cmd_adb_where(),
+        "devices" => cmd_adb_devices(),
+        "probe" => cmd_adb_probe(rest.first().map(|s| s.as_str())),
+        "shell" => cmd_adb_shell(rest),
+        "caps" => {
+            if rest.is_empty() {
+                eprintln!("usage: adb caps <serial>");
+                return ExitCode::from(1);
+            }
+            cmd_adb_caps(&rest[0])
+        }
+        "manifest" => {
+            if rest.len() < 2 {
+                eprintln!("usage: adb manifest <serial> <root>");
+                return ExitCode::from(1);
+            }
+            cmd_adb_manifest(&rest[0], &rest[1])
+        }
+        "tar-upload" => {
+            if rest.len() < 3 {
+                eprintln!("usage: adb tar-upload <serial> <src> <dest>");
+                return ExitCode::from(1);
+            }
+            cmd_adb_tar_upload(&rest[0], &rest[1], &rest[2])
+        }
+        "smoke" => {
+            if rest.is_empty() {
+                eprintln!("usage: adb smoke <serial>");
+                return ExitCode::from(1);
+            }
+            cmd_adb_smoke(&rest[0])
+        }
+        "plan" => {
+            if rest.len() < 3 {
+                eprintln!("usage: adb plan <serial> <src> <dest>");
+                return ExitCode::from(1);
+            }
+            cmd_adb_plan(&rest[0], &rest[1], &rest[2])
+        }
+        "verify-q" => {
+            if rest.len() < 3 {
+                eprintln!("usage: adb verify-q <serial> <src> <dest>");
+                return ExitCode::from(1);
+            }
+            cmd_adb_verify_q(&rest[0], &rest[1], &rest[2])
+        }
+        other => {
+            eprintln!("unknown adb subcommand: {other}");
+            return ExitCode::from(1);
+        }
+    };
+
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("error: {e}");
+            if e.is_likely_user_action_required() {
+                eprintln!("hint: check the USB debugging prompt on the phone, or replug the cable.");
+            }
+            if matches!(e, AdbError::AdbNotAvailable) {
+                eprintln!(
+                    "hint: install Android platform-tools, or set CROSSMTP_ADB=/path/to/adb."
+                );
+            }
+            ExitCode::from(2)
+        }
+    }
 }
 
 fn parse_u32(s: &str) -> Result<u32, MtpError> {

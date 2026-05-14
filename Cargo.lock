@@ -3,6 +3,14 @@
 version = 4
 
 [[package]]
+name = "adb-session"
+version = "0.0.2"
+dependencies = [
+ "tar-stream",
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -458,10 +466,12 @@ checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
 name = "crossmtp-desktop"
 version = "0.0.2"
 dependencies = [
+ "adb-session",
  "mtp-session",
  "orchestrator",
  "serde",
  "serde_json",
+ "tar-stream",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
@@ -1968,8 +1978,10 @@ dependencies = [
 name = "mtp-cli"
 version = "0.0.2"
 dependencies = [
+ "adb-session",
  "mtp-session",
  "orchestrator",
+ "tar-stream",
 ]
 
 [[package]]
@@ -2238,7 +2250,9 @@ checksum = "04744f49eae99ab78e0d5c0b603ab218f515ea8cfe5a456d7629ad883a3b6e7d"
 name = "orchestrator"
 version = "0.0.2"
 dependencies = [
+ "adb-session",
  "mtp-session",
+ "tar-stream",
  "thiserror 1.0.69",
 ]
 
@@ -3472,6 +3486,13 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "tar-stream"
+version = "0.0.2"
+dependencies = [
+ "thiserror 1.0.69",
 ]
 
 [[package]]

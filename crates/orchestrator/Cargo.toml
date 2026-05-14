@@ -10,6 +10,8 @@ path = "src/lib.rs"
 
 [dependencies]
 mtp-session = { path = "../mtp-session" }
+adb-session = { path = "../adb-session" }
+tar-stream = { path = "../tar-stream" }
 thiserror = "1"
 
 [lints]

@@ -1,0 +1,15 @@
+[package]
+name = "tar-stream"
+version.workspace = true
+edition.workspace = true
+description = "On-the-fly USTAR stream builder for CrossMTP ADB upload (Phase 2)"
+
+[lib]
+name = "tar_stream"
+path = "src/lib.rs"
+
+[dependencies]
+thiserror = "1"
+
+[lints]
+workspace = true

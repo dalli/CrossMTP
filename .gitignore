@@ -11,3 +11,6 @@ dist/
 .omc
 .omx
 .cargo
+
+# Phase 0 raw device probe logs (device-specific, not source)
+scripts/.adb-phase0/

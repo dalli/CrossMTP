@@ -57,7 +57,8 @@ export type ConflictPolicy = "skip" | "rename" | "overwrite";
 export type JobKindView =
   | { kind: "download"; storageId: number; fileId: number; name: string; destDir: string; expectedSize: number }
   | { kind: "upload"; storageId: number; parentId: number; source: string; name: string }
-  | { kind: "bulkUpload"; storageId: number; parentId: number; source: string; name: string };
+  | { kind: "bulkUpload"; storageId: number; parentId: number; source: string; name: string }
+  | { kind: "adbTarUpload"; serial: string; source: string; destPath: string };
 
 export interface JobView {
   id: number;
@@ -93,4 +94,39 @@ export interface DeviceSnapshot {
   error: string | null;
   /** Heuristic: orchestrator-friendly hint for the user. */
   permissionHint: boolean;
+}
+
+// ---- Phase 4: ADB capability + plan wire types ----
+
+export interface AdbDeviceWire {
+  serial: string;
+  /** "device", "unauthorized", "offline", "no_permissions", ... */
+  state: string;
+  model: string | null;
+  canTarUpload: boolean;
+  tarExtractSmokeOk: boolean;
+  hasTar: boolean;
+  hasFind: boolean;
+  hasStat: boolean;
+  tarImpl: string | null;
+}
+
+export interface AdbStatusWire {
+  adbAvailable: boolean;
+  adbPath: string | null;
+  adbSource: string | null;
+  error: string | null;
+  devices: AdbDeviceWire[];
+}
+
+export interface AdbRenamedPair {
+  original: string;
+  newName: string;
+}
+
+export interface AdbPlanReport {
+  planToken: number;
+  clean: string[];
+  skippedSame: string[];
+  renamed: AdbRenamedPair[];
 }

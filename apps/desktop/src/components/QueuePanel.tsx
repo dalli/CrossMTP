@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { JobStateTag, JobView, QueueGroupView } from "../types";
 
 interface Props {
@@ -31,6 +32,8 @@ export function QueuePanel({ jobs, groups, onCancel }: Props) {
   const rows = buildRows(jobs, groups);
   const totalFiles = jobs.length;
   const remainingFiles = jobs.filter((job) => !isTerminal(job.state.tag)).length;
+  const skipped = jobs.filter((j) => j.state.tag === "skipped");
+  const [showSkipped, setShowSkipped] = useState(false);
 
   return (
     <div className="queue">
@@ -39,7 +42,25 @@ export function QueuePanel({ jobs, groups, onCancel }: Props) {
         <span className="count">
           남은 {remainingFiles} / 전체 {totalFiles}
         </span>
+        {skipped.length > 0 && (
+          <button
+            className="ghost queue-skipped-toggle"
+            onClick={() => setShowSkipped((v) => !v)}
+          >
+            Skipped {skipped.length}개 — {showSkipped ? "숨기기" : "보기"}
+          </button>
+        )}
       </div>
+      {showSkipped && skipped.length > 0 && (
+        <div className="queue-skipped-list">
+          {skipped.map((j) => (
+            <div className="queue-skipped-item" key={j.id}>
+              <span className="name">{labelFor(j)}</span>
+              <span className="reason">{j.state.reason ?? "skipped"}</span>
+            </div>
+          ))}
+        </div>
+      )}
       <div className="queue-list">
         {rows.length === 0 && (
           <div className="queue-empty">대기 중인 전송 작업이 없습니다.</div>
@@ -150,11 +171,12 @@ function makeRow(key: string, jobs: JobView[], group?: QueueGroupView): QueueRow
   const first = jobs[0];
   const bulk = jobs.find((j) => j.kind.kind === "bulkUpload");
   const totalFiles = group?.totalFiles ?? bulk?.totalFiles ?? jobs.length;
+  const baseLabel = labelFor(first);
   const label = group
     ? `${group.label} (${totalFiles}개 파일)`
     : bulk && bulk.totalFiles
-      ? `${first.kind.name} (${bulk.totalFiles}개 파일)`
-      : first.kind.name;
+      ? `${baseLabel} (${bulk.totalFiles}개 파일)`
+      : baseLabel;
   const sent = jobs.reduce((sum, job) => sum + job.sent, 0);
   const total = jobs.reduce((sum, job) => sum + job.total, 0);
   const stateTag = deriveState(jobs);
@@ -162,7 +184,7 @@ function makeRow(key: string, jobs: JobView[], group?: QueueGroupView): QueueRow
   return {
     key,
     label,
-    direction: first.kind.kind === "bulkUpload" ? "upload" : first.kind.kind,
+    direction: directionFor(first),
     jobs,
     totalFiles,
     stateTag,
@@ -175,6 +197,30 @@ function makeRow(key: string, jobs: JobView[], group?: QueueGroupView): QueueRow
     bulkTotalFiles: bulk?.totalFiles,
     bulkCurrentFile: bulk?.currentFile,
   };
+}
+
+function labelFor(job: JobView): string {
+  switch (job.kind.kind) {
+    case "download":
+    case "upload":
+    case "bulkUpload":
+      return job.kind.name;
+    case "adbTarUpload":
+      // Show the *destination* basename so the user can tell apart
+      // multiple concurrent ADB uploads to different folders.
+      return `[ADB] ${job.kind.destPath.split("/").filter(Boolean).pop() ?? job.kind.destPath}`;
+  }
+}
+
+function directionFor(job: JobView): "download" | "upload" {
+  switch (job.kind.kind) {
+    case "download":
+      return "download";
+    case "upload":
+    case "bulkUpload":
+    case "adbTarUpload":
+      return "upload";
+  }
 }
 
 function deriveState(jobs: JobView[]): JobStateTag {
