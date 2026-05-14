@@ -36,6 +36,7 @@ fn main() -> ExitCode {
         "push" => cmd_push(&session, rest),
         "verify" => cmd_verify(&session),
         "verify-q" => cmd_verify_q(&session),
+        "adb" => return cmd_adb(rest),
         "help" | "--help" | "-h" => {
             print_usage(&args[0]);
             return ExitCode::SUCCESS;
@@ -68,7 +69,11 @@ fn print_usage(prog: &str) {
          {prog} pull <storage_id> <file_id> <dest_path>\n  \
          {prog} push <storage_id> <parent_id> <src_path>\n  \
          {prog} verify   (single-process read+write probe via mtp-session)\n  \
-         {prog} verify-q (single-process probe via Phase 2 orchestrator: progress + cancel + conflict)"
+         {prog} verify-q (single-process probe via Phase 2 orchestrator: progress + cancel + conflict)\n  \
+         {prog} adb where                          (resolve adb executable and source)\n  \
+         {prog} adb devices                        (list adb devices with classified state)\n  \
+         {prog} adb probe [serial]                 (Phase 1 capability probe: discovery + state + shell echo)\n  \
+         {prog} adb shell <serial> -- <cmd...>     (run an adb shell command, capture stdout/stderr)"
     );
 }
 
@@ -593,6 +598,144 @@ fn drain_until_terminal_with_label(
         }
     }
     None
+}
+
+/// Dispatch the `adb <sub>` subcommands. Returns ExitCode directly so the
+/// adb error model (`AdbError`) doesn't need to be cross-cast to `MtpError`.
+fn cmd_adb(rest: &[String]) -> ExitCode {
+    use adb_session::{AdbError, AdbSession};
+
+    let (sub, rest) = match rest.split_first() {
+        Some((s, r)) => (s.as_str(), r),
+        None => {
+            eprintln!("usage: adb {{where|devices|probe|shell}} [...]");
+            return ExitCode::from(1);
+        }
+    };
+
+    fn cmd_adb_where() -> std::result::Result<(), AdbError> {
+        let loc = adb_session::discover_adb()?;
+        println!("adb path:   {}", loc.path.display());
+        println!("adb source: {:?}", loc.source);
+        Ok(())
+    }
+
+    fn cmd_adb_devices() -> std::result::Result<(), AdbError> {
+        let session = AdbSession::open()?;
+        let devs = session.list_devices()?;
+        if devs.is_empty() {
+            println!("(no devices)");
+            return Ok(());
+        }
+        for d in &devs {
+            println!(
+                "{:<24} state={:<14} transport_id={} model={} product={}",
+                d.serial,
+                format!("{:?}", d.state),
+                d.transport_id
+                    .map(|t| t.to_string())
+                    .unwrap_or_else(|| "-".into()),
+                d.model.as_deref().unwrap_or("-"),
+                d.product.as_deref().unwrap_or("-"),
+            );
+        }
+        Ok(())
+    }
+
+    fn cmd_adb_probe(serial_arg: Option<&str>) -> std::result::Result<(), AdbError> {
+        println!("=== adb probe ===");
+        let session = AdbSession::open()?;
+        let loc = session.location();
+        println!("adb: {} ({:?})", loc.path.display(), loc.source);
+        let cap = session.capabilities();
+        println!(
+            "caps: probe={} tar_upload={} shell={} child_tracking={}",
+            cap.adb_availability_probe,
+            cap.adb_tar_upload,
+            cap.can_run_shell,
+            cap.can_track_child_processes,
+        );
+        let device = match serial_arg {
+            Some(s) => session.require_device(s)?,
+            None => session.pick_ready_device()?,
+        };
+        println!(
+            "device: serial={} state={:?} model={:?} product={:?}",
+            device.serial, device.state, device.model, device.product,
+        );
+        // Phase 1 shell smoke check: device-side getprop is cheap and
+        // proves the shell pipe works without writing anything.
+        let out = session.shell(&device.serial, &["getprop", "ro.build.version.release"])?;
+        println!(
+            "shell exit={} ro.build.version.release={}",
+            out.exit_code,
+            out.stdout.trim()
+        );
+        Ok(())
+    }
+
+    fn cmd_adb_shell(rest: &[String]) -> std::result::Result<(), AdbError> {
+        if rest.len() < 2 {
+            eprintln!("usage: adb shell <serial> -- <cmd...>");
+            return Err(AdbError::CommandFailed {
+                code: -1,
+                stderr: "missing args".into(),
+            });
+        }
+        let serial = &rest[0];
+        // Accept either `shell SER -- echo hi` or `shell SER echo hi`.
+        let cmd_start = if rest[1] == "--" { 2 } else { 1 };
+        if cmd_start >= rest.len() {
+            eprintln!("usage: adb shell <serial> -- <cmd...>");
+            return Err(AdbError::CommandFailed {
+                code: -1,
+                stderr: "missing command".into(),
+            });
+        }
+        let cmd: Vec<&str> = rest[cmd_start..].iter().map(|s| s.as_str()).collect();
+        let session = AdbSession::open()?;
+        let out = session.shell(serial, &cmd)?;
+        if !out.stdout.is_empty() {
+            print!("{}", out.stdout);
+        }
+        if !out.stderr.is_empty() {
+            eprint!("{}", out.stderr);
+        }
+        if out.exit_code != 0 {
+            return Err(AdbError::CommandFailed {
+                code: out.exit_code,
+                stderr: out.stderr,
+            });
+        }
+        Ok(())
+    }
+
+    let result: std::result::Result<(), AdbError> = match sub {
+        "where" => cmd_adb_where(),
+        "devices" => cmd_adb_devices(),
+        "probe" => cmd_adb_probe(rest.first().map(|s| s.as_str())),
+        "shell" => cmd_adb_shell(rest),
+        other => {
+            eprintln!("unknown adb subcommand: {other}");
+            return ExitCode::from(1);
+        }
+    };
+
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("error: {e}");
+            if e.is_likely_user_action_required() {
+                eprintln!("hint: check the USB debugging prompt on the phone, or replug the cable.");
+            }
+            if matches!(e, AdbError::AdbNotAvailable) {
+                eprintln!(
+                    "hint: install Android platform-tools, or set CROSSMTP_ADB=/path/to/adb."
+                );
+            }
+            ExitCode::from(2)
+        }
+    }
 }
 
 fn parse_u32(s: &str) -> Result<u32, MtpError> {

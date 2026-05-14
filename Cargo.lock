@@ -3,6 +3,13 @@
 version = 4
 
 [[package]]
+name = "adb-session"
+version = "0.0.2"
+dependencies = [
+ "thiserror 1.0.69",
+]
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1968,6 +1975,7 @@ dependencies = [
 name = "mtp-cli"
 version = "0.0.2"
 dependencies = [
+ "adb-session",
  "mtp-session",
  "orchestrator",
 ]

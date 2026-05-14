@@ -1,0 +1,15 @@
+[package]
+name = "adb-session"
+version.workspace = true
+edition.workspace = true
+description = "ADB Session Layer for CrossMTP: adb executable discovery, device probe, shell command lifecycle"
+
+[lib]
+name = "adb_session"
+path = "src/lib.rs"
+
+[dependencies]
+thiserror = "1"
+
+[lints]
+workspace = true
