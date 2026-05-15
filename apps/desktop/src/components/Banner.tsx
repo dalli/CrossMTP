@@ -1,6 +1,8 @@
 import { useMemo, useState } from "react";
 import { ConflictPolicy, DeviceSnapshot } from "../types";
 
+import { useTranslation } from "react-i18next";
+
 interface Props {
   snapshot: DeviceSnapshot | null;
   loading: boolean;
@@ -18,31 +20,30 @@ export function Banner({
   onRefresh,
   onConflictChange,
 }: Props) {
+  const { t } = useTranslation();
   const [showNotifications, setShowNotifications] = useState(true);
   const connected = !!(snapshot && snapshot.devices.length > 0 && snapshot.storages.length > 0);
   const device = snapshot?.devices[0];
   const storage = snapshot?.storages[0];
   const notification = useMemo(() => {
     const title = connected
-      ? `${device?.manufacturer ?? ""} ${device?.model ?? ""}`.trim() || "기기 연결됨"
-      : "기기 없음";
+      ? `${device?.manufacturer ?? ""} ${device?.model ?? ""}`.trim() || t("device.connected")
+      : t("device.none");
     const lines = [
       connected && storage
-        ? `${storage.description ?? ""} · ${formatBytes(storage.freeBytes)} 여유 / ${formatBytes(storage.maxBytes)}`
+        ? `${storage.description ?? ""} · ${t("storage.free", { free: formatBytes(storage.freeBytes), total: formatBytes(storage.maxBytes) })}`
         : snapshot?.error
           ? snapshot.error
-          : "Android 폰을 USB로 연결한 뒤 폰에서 'MTP / 파일 전송'을 선택하세요.",
+          : t("hint.connect"),
     ];
 
     if (snapshot?.permissionHint && !connected) {
-      lines.push(
-        "힌트: macOS의 Image Capture / Android File Transfer가 USB를 잡고 있으면 인식되지 않습니다. 해당 앱을 종료하고 새로고침해주세요.",
-      );
+      lines.push(t("hint.macos"));
     }
     lines.push(...envHints.map((hint) => `⚠ ${hint}`));
 
     return { title, lines };
-  }, [connected, device?.manufacturer, device?.model, envHints, snapshot?.error, snapshot?.permissionHint, storage]);
+  }, [connected, device?.manufacturer, device?.model, envHints, snapshot?.error, snapshot?.permissionHint, storage, t]);
 
   return (
     <>
@@ -52,10 +53,10 @@ export function Banner({
           className={showNotifications ? "active" : ""}
           onClick={() => setShowNotifications((visible) => !visible)}
         >
-          알림
+          {t("notice")}
         </button>
         <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "var(--text-dim)" }}>
-          충돌 시
+          {t("conflict.policy")}
           <select
             value={conflictPolicy}
             onChange={(e) => onConflictChange(e.target.value as ConflictPolicy)}
@@ -67,13 +68,13 @@ export function Banner({
               padding: "3px 6px",
             }}
           >
-            <option value="rename">이름 변경</option>
-            <option value="skip">건너뛰기</option>
-            <option value="overwrite">덮어쓰기 (다운로드만)</option>
+            <option value="rename">{t("conflict.rename")}</option>
+            <option value="skip">{t("conflict.skip")}</option>
+            <option value="overwrite">{t("conflict.overwrite")}</option>
           </select>
         </label>
         <button className="primary" onClick={onRefresh} disabled={loading}>
-          {loading ? "..." : "새로고침"}
+          {loading ? "..." : t("refresh")}
         </button>
       </div>
       {showNotifications && (
@@ -88,7 +89,7 @@ export function Banner({
             ))}
           </div>
           <button
-            aria-label="알림 닫기"
+            aria-label={t("close.notice")}
             className="icon-button"
             onClick={() => setShowNotifications(false)}
           >

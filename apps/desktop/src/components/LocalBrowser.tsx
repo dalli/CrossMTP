@@ -1,4 +1,5 @@
 import { PointerEvent, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { LocalEntry } from "../types";
 import { formatBytes } from "./Banner";
 
@@ -27,10 +28,10 @@ const formatDate = (secs: number) => {
   }).replace(/\. /g, "-").replace(/\./g, "");
 };
 
-const getFileType = (name: string, isDir: boolean) => {
-  if (isDir) return "폴더";
+const getFileType = (name: string, isDir: boolean, t: any) => {
+  if (isDir) return t("browser.folder");
   const ext = name.split(".").pop();
-  return ext && ext !== name ? ext.toUpperCase() : "파일";
+  return ext && ext !== name ? ext.toUpperCase() : t("browser.file");
 };
 
 export function LocalBrowser({
@@ -41,6 +42,7 @@ export function LocalBrowser({
   onCrumb,
   onDragItem,
 }: Props) {
+  const { t } = useTranslation();
   const [sortKey, setSortKey] = useState<SortKey>("name");
   const [sortOrder, setSortOrder] = useState<SortOrder>("asc");
 
@@ -70,7 +72,7 @@ export function LocalBrowser({
           cmp = a.name.localeCompare(b.name);
           break;
         case "type":
-          cmp = getFileType(a.name, a.isDir).localeCompare(getFileType(b.name, b.isDir));
+          cmp = getFileType(a.name, a.isDir, t).localeCompare(getFileType(b.name, b.isDir, t));
           break;
         case "date":
           cmp = a.modified - b.modified;
@@ -81,9 +83,9 @@ export function LocalBrowser({
       }
       return sortOrder === "asc" ? cmp : -cmp;
     });
-  }, [entries, sortKey, sortOrder]);
+  }, [entries, sortKey, sortOrder, t]);
 
-  const breadcrumbs = useMemo(() => buildLocalBreadcrumbs(currentPath), [currentPath]);
+  const breadcrumbs = useMemo(() => buildLocalBreadcrumbs(currentPath, t), [currentPath, t]);
 
   const renderHeader = (key: SortKey, label: string) => (
     <div 
@@ -124,16 +126,16 @@ export function LocalBrowser({
       )}
 
       <div className="table-header">
-        {renderHeader("name", "파일명")}
-        {renderHeader("type", "종류")}
-        {renderHeader("date", "날짜")}
-        {renderHeader("size", "크기")}
+        {renderHeader("name", t("browser.name"))}
+        {renderHeader("type", t("browser.type"))}
+        {renderHeader("date", t("browser.date"))}
+        {renderHeader("size", t("browser.size"))}
       </div>
 
       <div className="entries" style={{ flex: 1, overflowY: "auto", position: "relative" }}>
         {sortedEntries.length === 0 && !error && (
           <div style={{ padding: 20, color: "var(--text-dim)", fontSize: 12, textAlign: "center" }}>
-            (비어있음)
+            {t("browser.empty")}
           </div>
         )}
         {sortedEntries.map((e) => (
@@ -149,7 +151,7 @@ export function LocalBrowser({
               <span className="icon">{e.isDir ? "📁" : "📄"}</span>
               <span title={e.name}>{e.name}</span>
             </div>
-            <div className="col-type">{getFileType(e.name, e.isDir)}</div>
+            <div className="col-type">{getFileType(e.name, e.isDir, t)}</div>
             <div className="col-date">{formatDate(e.modified)}</div>
             <div className="col-size">{e.isDir ? "-" : formatBytes(e.size)}</div>
           </div>
@@ -159,8 +161,8 @@ export function LocalBrowser({
   );
 }
 
-function buildLocalBreadcrumbs(path: string): { label: string; path: string }[] {
-  if (!path) return [{ label: "로컬 디스크", path: "" }];
+function buildLocalBreadcrumbs(path: string, t: any): { label: string; path: string }[] {
+  if (!path) return [{ label: t("browser.local_disk"), path: "" }];
 
   const isWindows = path.includes("\\");
   const separator = isWindows ? "\\" : "/";

@@ -1,1 +1,1 @@
-{"root":["./src/app.tsx","./src/dragstore.ts","./src/main.tsx","./src/types.ts","./src/components/adbpanel.tsx","./src/components/banner.tsx","./src/components/browser.tsx","./src/components/localbrowser.tsx","./src/components/queuepanel.tsx"],"version":"5.9.3"}
+{"root":["./src/app.tsx","./src/dragstore.ts","./src/i18n.ts","./src/main.tsx","./src/types.ts","./src/components/adbpanel.tsx","./src/components/banner.tsx","./src/components/browser.tsx","./src/components/localbrowser.tsx","./src/components/queuepanel.tsx"],"version":"5.9.3"}

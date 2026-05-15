@@ -8,6 +8,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { useTranslation } from "react-i18next";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { ask } from "@tauri-apps/plugin-dialog";
@@ -41,6 +42,7 @@ type InternalDrag =
   | { type: "mtp"; item: Entry; label: string; x: number; y: number };
 
 export function App() {
+  const { t } = useTranslation();
   const [snapshot, setSnapshot] = useState<DeviceSnapshot | null>(null);
   const [loading, setLoading] = useState(false);
   const [activeStorage, setActiveStorage] = useState<Storage | null>(null);
@@ -138,8 +140,8 @@ export function App() {
         const isPaused = await invoke<boolean>("get_queue_state");
         if (isPaused) {
           const shouldResume = await ask(
-            "이전에 중단된 전송이 있습니다. 이어서 전송하시겠습니까?\n\n[예: 이어서 전송] [아니오: 대기열 지우고 새로 시작]",
-            { title: "이어받기", kind: "info" }
+            t("app.resume.prompt"),
+            { title: t("app.resume.title"), kind: "info" }
           );
           if (shouldResume) {
             await invoke("resume_queue");
@@ -228,7 +230,7 @@ export function App() {
   useEffect(() => {
     const unlistenTransfer = listen<TransferEvent>("transfer-event", (e) => {
       if (e.payload.type === "queuePaused") {
-        setBrowserError(`전송이 중단되었습니다: ${e.payload.reason}`);
+        setBrowserError(`${t("app.transfer.paused")}${e.payload.reason}`);
         return;
       }
 
@@ -260,9 +262,15 @@ export function App() {
       .then((r) => setEnvHints(r.hints))
       .catch(() => {});
     refresh();
+
+    const unlistenLang = listen<string>("language-changed", (e) => {
+      import("i18next").then((i18next) => i18next.default.changeLanguage(e.payload));
+    });
+
     return () => {
       unlistenTransfer.then((fn) => fn());
       unlistenDrop.then((fn) => fn());
+      unlistenLang.then((fn) => fn());
     };
   }, [loadLocalEntries, refresh, refreshAfterTransfer]);
 
@@ -289,7 +297,7 @@ export function App() {
   const downloadLocalFile = useCallback(
     async (entryData: string) => {
       if (!localPath || !activeStorage) {
-        setBrowserError("로컬 대상 폴더가 없거나 기기가 연결되지 않았습니다.");
+        setBrowserError(t("app.error.local_missing"));
         return;
       }
       try {
@@ -308,7 +316,7 @@ export function App() {
         rememberGroup(ids, entry.name, entry.kind === "folder", setJobGroups);
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        alert("다운로드 오류: " + msg);
+        alert(`${t("app.error.download")}${msg}`);
         setBrowserError(msg);
       }
       setTimeout(() => {
@@ -375,7 +383,7 @@ export function App() {
   const uploadFiles = useCallback(
     async (paths: string[]) => {
       if (!activeStorage) {
-        setBrowserError("업로드할 기기 저장소가 연결되지 않았습니다.");
+        setBrowserError(t("app.error.no_storage"));
         return;
       }
       const parent = breadcrumb[breadcrumb.length - 1]?.id ?? PARENT_ROOT;
@@ -406,6 +414,7 @@ export function App() {
             activeStorage,
             breadcrumb,
             setJobGroups,
+            t,
           );
           for (const p of route.handled) adbHandled.add(p);
           for (const msg of route.errors) failures.push(msg);
@@ -413,7 +422,7 @@ export function App() {
           // Never let an ADB-routing throw kill the React tree —
           // surface it on the banner and fall back to MTP for everything.
           failures.push(
-            `[ADB 라우팅 예외] ${e instanceof Error ? e.message : String(e)}`,
+            `${t("app.error.adb_routing")}${e instanceof Error ? e.message : String(e)}`,
           );
         }
       }
@@ -489,7 +498,7 @@ export function App() {
             />
           </div>
           <div
-            aria-label="PC와 Android 패널 너비 조절"
+            aria-label={t("app.aria.horizontal")}
             aria-orientation="vertical"
             className="resizer horizontal"
             onPointerDown={startHorizontalResize}
@@ -507,7 +516,7 @@ export function App() {
           </div>
         </div>
         <div
-          aria-label="파일 패널과 전송 큐 높이 조절"
+          aria-label={t("app.aria.vertical")}
           aria-orientation="horizontal"
           className="resizer vertical"
           onPointerDown={startVerticalResize}
@@ -561,6 +570,7 @@ async function routeFoldersViaAdb(
   storage: Storage,
   breadcrumb: BreadcrumbNode[],
   setJobGroups: Dispatch<SetStateAction<Map<number, QueueGroupView>>>,
+  t: any,
 ): Promise<{ handled: string[]; errors: string[] }> {
   const handled: string[] = [];
   const errors: string[] = [];
@@ -628,20 +638,15 @@ async function routeFoldersViaAdb(
     } catch (e) {
       // Plan failure → don't claim this folder; let MTP handle it.
       errors.push(
-        `ADB 준비 실패(${folderName}): ${e instanceof Error ? e.message : String(e)} — MTP로 시도합니다.`,
+        t("adb.prep_failed", { folderName, error: e instanceof Error ? e.message : String(e) }),
       );
       continue;
     }
 
     const totalConflicts = report.skippedSame.length + report.renamed.length;
     if (totalConflicts > 0) {
-      const msg =
-        `'${folderName}' 폴더를 고속(ADB) 업로드합니다.\n\n` +
-        `• 새 파일: ${report.clean.length}\n` +
-        `• 동일 파일 건너뜀: ${report.skippedSame.length}\n` +
-        `• 이름 변경 후 업로드: ${report.renamed.length}\n\n` +
-        `진행하시겠어요? (아니오를 선택하면 기존 MTP로 전송)`;
-      const proceed = await ask(msg, { title: "ADB 고속 업로드 확인", kind: "info" });
+      const msg = t("adb.confirm.msg", { folderName, clean: report.clean.length, skipped: report.skippedSame.length, renamed: report.renamed.length });
+      const proceed = await ask(msg, { title: t("adb.confirm.title"), kind: "info" });
       if (!proceed) continue; // → falls through to MTP
     }
 
@@ -653,7 +658,7 @@ async function routeFoldersViaAdb(
       handled.push(folder);
     } catch (e) {
       errors.push(
-        `ADB 전송 시작 실패(${folderName}): ${e instanceof Error ? e.message : String(e)} — MTP로 시도합니다.`,
+        t("adb.start_failed", { folderName, error: e instanceof Error ? e.message : String(e) }),
       );
     }
   }

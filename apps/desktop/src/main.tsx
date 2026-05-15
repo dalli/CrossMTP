@@ -2,6 +2,7 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import { App } from "./App";
 import "./styles.css";
+import "./i18n";
 
 class ErrorBoundary extends React.Component<
   { children: React.ReactNode },
@@ -18,14 +19,14 @@ class ErrorBoundary extends React.Component<
     if (this.state.error) {
       return (
         <div style={{ padding: 24, color: "#ff7676", fontFamily: "monospace", whiteSpace: "pre-wrap" }}>
-          <h2>UI 오류</h2>
+          <h2>UI Error</h2>
           <div>{String(this.state.error?.message ?? this.state.error)}</div>
           <pre style={{ marginTop: 12, fontSize: 12 }}>{this.state.error?.stack ?? ""}</pre>
           <button
             style={{ marginTop: 16 }}
             onClick={() => this.setState({ error: null })}
           >
-            다시 시도
+            Retry
           </button>
         </div>
       );

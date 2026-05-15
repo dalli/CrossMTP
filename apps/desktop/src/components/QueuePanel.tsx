@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 import { JobStateTag, JobView, QueueGroupView } from "../types";
 
 interface Props {
@@ -29,7 +30,8 @@ interface QueueRow {
 }
 
 export function QueuePanel({ jobs, groups, onCancel }: Props) {
-  const rows = buildRows(jobs, groups);
+  const { t } = useTranslation();
+  const rows = buildRows(jobs, groups, t);
   const totalFiles = jobs.length;
   const remainingFiles = jobs.filter((job) => !isTerminal(job.state.tag)).length;
   const skipped = jobs.filter((j) => j.state.tag === "skipped");
@@ -38,16 +40,16 @@ export function QueuePanel({ jobs, groups, onCancel }: Props) {
   return (
     <div className="queue">
       <div className="queue-header">
-        전송 큐
+        {t("queue.title")}
         <span className="count">
-          남은 {remainingFiles} / 전체 {totalFiles}
+          {t("queue.progress", { remaining: remainingFiles, total: totalFiles })}
         </span>
         {skipped.length > 0 && (
           <button
             className="ghost queue-skipped-toggle"
             onClick={() => setShowSkipped((v) => !v)}
           >
-            Skipped {skipped.length}개 — {showSkipped ? "숨기기" : "보기"}
+            {t("queue.skipped", { skipped: skipped.length, toggle: showSkipped ? t("queue.hide") : t("queue.show") })}
           </button>
         )}
       </div>
@@ -63,7 +65,7 @@ export function QueuePanel({ jobs, groups, onCancel }: Props) {
       )}
       <div className="queue-list">
         {rows.length === 0 && (
-          <div className="queue-empty">대기 중인 전송 작업이 없습니다.</div>
+          <div className="queue-empty">{t("queue.empty")}</div>
         )}
         {rows.map((row) => {
           // For bulk uploads (single job that internally walks many
@@ -104,7 +106,7 @@ export function QueuePanel({ jobs, groups, onCancel }: Props) {
               <div className="meta">
                 {totalFilesShown > 1 && (
                   <span>
-                    {completedFiles}/{totalFilesShown} 파일 완료
+                    {t("queue.files_done", { done: completedFiles, total: totalFilesShown })}
                   </span>
                 )}
                 {row.stateTag === "transferring" && (row.total > 0 || useBulkProgress) && (
@@ -118,11 +120,11 @@ export function QueuePanel({ jobs, groups, onCancel }: Props) {
                 )}
                 {row.stateTag === "transferring" && row.bulkCurrentFile && (
                   <span className="current-file" title={row.bulkCurrentFile}>
-                    {" · "}현재: {row.bulkCurrentFile}
+                    {" · "}{t("queue.current", { file: row.bulkCurrentFile })}
                   </span>
                 )}
                 {row.stateTag === "completed" && row.totalFiles === 1 && row.jobs[0].state.bytes !== undefined && (
-                  <span>{formatBytes(row.jobs[0].state.bytes)} 전송됨</span>
+                  <span>{t("queue.transferred", { bytes: formatBytes(row.jobs[0].state.bytes) })}</span>
                 )}
               </div>
               {["queued", "validating", "transferring", "completed"].includes(row.stateTag) && (
@@ -139,7 +141,7 @@ export function QueuePanel({ jobs, groups, onCancel }: Props) {
                     }}
                     className="danger"
                   >
-                    취소
+                    {t("queue.cancel")}
                   </button>
                 </div>
               )}
@@ -151,7 +153,7 @@ export function QueuePanel({ jobs, groups, onCancel }: Props) {
   );
 }
 
-function buildRows(jobs: JobView[], groups: Map<number, QueueGroupView>): QueueRow[] {
+function buildRows(jobs: JobView[], groups: Map<number, QueueGroupView>, t: any): QueueRow[] {
   const buckets = new Map<string, { group?: QueueGroupView; jobs: JobView[] }>();
 
   for (const job of jobs) {
@@ -163,11 +165,11 @@ function buildRows(jobs: JobView[], groups: Map<number, QueueGroupView>): QueueR
   }
 
   return Array.from(buckets.entries())
-    .map(([key, bucket]) => makeRow(key, bucket.jobs, bucket.group))
+    .map(([key, bucket]) => makeRow(key, bucket.jobs, t, bucket.group))
     .sort((a, b) => b.startedAt - a.startedAt);
 }
 
-function makeRow(key: string, jobs: JobView[], group?: QueueGroupView): QueueRow {
+function makeRow(key: string, jobs: JobView[], t: any, group?: QueueGroupView): QueueRow {
   const first = jobs[0];
   const bulk = jobs.find((j) => j.kind.kind === "bulkUpload");
   const totalFiles = group?.totalFiles ?? bulk?.totalFiles ?? jobs.length;
@@ -188,7 +190,7 @@ function makeRow(key: string, jobs: JobView[], group?: QueueGroupView): QueueRow
     jobs,
     totalFiles,
     stateTag,
-    stateLabel: stateLabel(stateTag),
+    stateLabel: stateLabel(stateTag, t),
     sent,
     total,
     reason: jobs.find((job) => job.state.reason)?.state.reason,
@@ -235,24 +237,24 @@ function deriveState(jobs: JobView[]): JobStateTag {
   return "completed";
 }
 
-function stateLabel(tag: JobStateTag): string {
+function stateLabel(tag: JobStateTag, t: any): string {
   switch (tag) {
     case "queued":
-      return "대기 중";
+      return "Queued";
     case "validating":
-      return "확인 중";
+      return "Validating";
     case "transferring":
-      return "전송 중";
+      return "Transferring";
     case "cancelling":
-      return "취소 중";
+      return "Cancelling";
     case "completed":
-      return "완료";
+      return t("queue.state.completed");
     case "failed":
-      return "실패";
+      return "Failed";
     case "cancelled":
-      return "취소됨";
+      return t("queue.state.cancelled");
     case "skipped":
-      return "건너뜀";
+      return "Skipped";
   }
 }
 

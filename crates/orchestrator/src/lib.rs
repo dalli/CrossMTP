@@ -939,7 +939,7 @@ impl Worker {
                 // is marked Failed (mid-traversal resume requires
                 // checkpointed state, deferred to Step 2).
                 let error_msg = format!(
-                    "{e} — 새로고침 버튼을 눌러 기기를 재연결해주세요"
+                    "{e} — Please click the refresh button to reconnect the device"
                 );
                 self.transition(id, JobState::Failed(error_msg.clone()));
                 self.paused = true;
@@ -951,7 +951,7 @@ impl Worker {
                 // Send_File). Handle may still be alive — don't lock
                 // the whole queue; let the user try other paths.
                 let error_msg = format!(
-                    "{e} — 다른 위치/파일로 시도하거나 폰의 USB 모드와 권한을 확인해주세요"
+                    "{e} — Please try another location/file or check the phone's USB mode and permissions"
                 );
                 self.transition(id, JobState::Failed(error_msg));
                 self.cancels.lock().unwrap().remove(&id);

@@ -12,9 +12,11 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { useTranslation } from "react-i18next";
 import { AdbStatusWire } from "../types";
 
 export function AdbPanel() {
+  const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const [status, setStatus] = useState<AdbStatusWire | null>(null);
   const [loading, setLoading] = useState(false);
@@ -44,12 +46,12 @@ export function AdbPanel() {
   if (!open) {
     return (
       <div className="adb-strip collapsed">
-        <span className="adb-label">ADB 고속 업로드</span>
+        <span className="adb-label">{t("adb.panel.strip.label")}</span>
         <span className="adb-meta">
-          USB debugging이 켜진 Android 기기에서 폴더 업로드가 자동으로 빨라집니다.
+          {t("adb.panel.strip.desc")}
         </span>
         <button onClick={() => setOpen(true)} className="ghost">
-          상태 보기
+          {t("adb.panel.btn.show")}
         </button>
       </div>
     );
@@ -58,17 +60,17 @@ export function AdbPanel() {
   const ready = status?.devices.filter(
     (d) => d.state === "device" && d.canTarUpload && d.tarExtractSmokeOk,
   ) ?? [];
-  const banner = computeBanner(status, ready.length);
+  const banner = computeBanner(status, ready.length, t);
 
   return (
     <div className="adb-strip">
       <div className="adb-row">
-        <span className="adb-label">ADB 고속 업로드</span>
+        <span className="adb-label">{t("adb.panel.strip.label")}</span>
         <button onClick={refresh} disabled={loading}>
-          {loading ? "검사 중..." : "다시 검사"}
+          {loading ? t("adb.panel.btn.refresh_loading") : t("adb.panel.btn.refresh")}
         </button>
         <button onClick={() => setOpen(false)} className="ghost">
-          접기
+          {t("adb.panel.btn.hide")}
         </button>
       </div>
 
@@ -83,8 +85,8 @@ export function AdbPanel() {
                 {d.serial} · {d.state}
                 {d.state === "device" &&
                   (d.canTarUpload && d.tarExtractSmokeOk
-                    ? " · 고속 가능"
-                    : ` · 고속 불가 (tar=${d.hasTar ? "ok" : "없음"}, smoke=${d.tarExtractSmokeOk ? "ok" : "실패"})`)}
+                    ? t("adb.panel.status.capable")
+                    : t("adb.panel.status.incapable", { hasTar: d.hasTar ? t("adb.panel.status.ok") : t("adb.panel.status.none"), smoke: d.tarExtractSmokeOk ? t("adb.panel.status.ok") : t("adb.panel.status.failed") }))}
               </span>
             </li>
           ))}
@@ -97,39 +99,37 @@ export function AdbPanel() {
 function computeBanner(
   status: AdbStatusWire | null,
   readyCount: number,
+  t: any,
 ): { kind: "ok" | "warn" | "error"; message: string } | null {
   if (!status) return null;
   if (!status.adbAvailable) {
     return {
       kind: "error",
       message:
-        "adb 바이너리를 찾지 못했습니다. Android platform-tools를 설치하거나 CROSSMTP_ADB 환경변수를 설정해주세요." +
+        t("adb.banner.no_bin") +
         (status.error ? ` (${status.error})` : ""),
     };
   }
   if (status.devices.length === 0) {
     return {
       kind: "warn",
-      message:
-        "ADB로 인식된 기기가 없습니다. USB debugging이 켜져 있고 'Allow USB debugging' 프롬프트를 수락했는지 확인해주세요.",
+      message: t("adb.banner.no_device"),
     };
   }
   if (readyCount === 0) {
     return {
       kind: "warn",
-      message:
-        "사용 가능한 기기가 없습니다 — MTP 경로로 업로드됩니다. 위 목록에서 사유를 확인하세요.",
+      message: t("adb.banner.none_ready"),
     };
   }
   if (readyCount === 1) {
     return {
       kind: "ok",
-      message: "ADB 고속 업로드 사용 가능 — 폴더를 끌어다 놓으면 자동으로 적용됩니다.",
+      message: t("adb.banner.ready"),
     };
   }
   return {
     kind: "warn",
-    message:
-      "고속 가능한 기기가 2개 이상이라 자동 라우팅을 비활성화했습니다 (한 대만 연결하면 자동 적용).",
+    message: t("adb.banner.too_many"),
   };
 }

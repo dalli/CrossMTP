@@ -1274,6 +1274,28 @@ pub fn run() {
                 let _ = window.set_title("CrossMTP (alpha)");
             }
 
+            // --- Menu Setup ---
+            if let Ok(menu) = tauri::menu::Menu::default(app.handle()) {
+                if let (Ok(en_item), Ok(ko_item)) = (
+                    tauri::menu::MenuItem::with_id(app, "lang_en", "English", true, None::<&str>),
+                    tauri::menu::MenuItem::with_id(app, "lang_ko", "한국어", true, None::<&str>)
+                ) {
+                    if let Ok(lang_menu) = tauri::menu::Submenu::with_id_and_items(app, "language", "Language", true, &[&en_item, &ko_item]) {
+                        let _ = menu.append(&lang_menu);
+                        let _ = app.set_menu(menu);
+                    }
+                }
+            }
+
+            app.on_menu_event(move |app_handle, event| {
+                if event.id().as_ref() == "lang_en" {
+                    let _ = app_handle.emit("language-changed", "en");
+                } else if event.id().as_ref() == "lang_ko" {
+                    let _ = app_handle.emit("language-changed", "ko");
+                }
+            });
+            // ------------------
+
             let (orch, events) = Orchestrator::start(None);
             let orch = Arc::new(orch);
             let orch_for_state = orch.clone();
